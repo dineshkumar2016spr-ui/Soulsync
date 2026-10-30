@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmd /c del /f \"c:\\\\Users\\\\Dinesh\\\\Desktop\\\\ai love agent\\\\src\\\\App.tsx\")",
+      "Bash(dir \"c:\\\\Users\\\\Dinesh\\\\Desktop\\\\ai love agent\\\\src\\\\App.tsx\")",
+      "Bash(del \"c:\\\\Users\\\\Dinesh\\\\Desktop\\\\ai love agent\\\\src\\\\App.tsx\")"
+    ]
+  }
+}
