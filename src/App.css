@@ -111,6 +111,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .empty-contacts { padding: 28px 12px; display: flex; align-items: center; flex-direction: column; color: #706873; font-size: 11px; gap: 6px; }
 .empty-contacts small { color: #a29ba4; font-size: 10px; }
 .inbox-footer { border-top: 1px solid #f2eff2; padding: 12px 14px; display: flex; align-items: center; gap: 7px; color: #a49da5; font-size: 9px; }
+.refresh-inbox-button { margin: 0 14px 12px; padding: 7px 10px; border: 1px solid #f0e4e9; border-radius: 8px; background: #fff8fa; color: #a6506d; font-size: 10px; font-weight: 600; cursor: pointer; }
+.refresh-inbox-button:hover:not(:disabled) { background: #fdeff4; }
+.refresh-inbox-button:disabled { opacity: .55; cursor: default; }
 .footer-status-dot { width: 5px; height: 5px; }
 
 /* Conversation */

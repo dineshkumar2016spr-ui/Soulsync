@@ -14,6 +14,8 @@ const isProduction = process.env.NODE_ENV === 'production'
 const appId = process.env.INSTAGRAM_APP_ID
 const appSecret = process.env.INSTAGRAM_APP_SECRET
 const redirectUri = process.env.INSTAGRAM_REDIRECT_URI || `http://localhost:${port}/api/instagram/callback`
+// Facebook Graph version used for OAuth + Instagram messaging. Override with GRAPH_API_VERSION.
+const graphVersion = process.env.GRAPH_API_VERSION || 'v21.0'
 const scopes = ['instagram_basic', 'instagram_manage_messages', 'pages_show_list', 'pages_read_engagement']
 const cookieName = 'muse_oauth_session'
 const sessionTtlMs = 60 * 24 * 60 * 60 * 1000
@@ -89,11 +91,24 @@ function requireConfigured(res) {
 function requireAuth(req, res) {
   const sessionId = getSessionId(req)
   const session = sessionId ? sessions.get(sessionId) : null
-  if (!session?.instagramAccount?.accessToken) {
-    res.status(401).json({ error: 'Not connected to Instagram' })
+  if (!session?.instagramAccount?.pageAccessToken) {
+    res.status(401).json({ error: 'Not connected to Instagram. Connect an Instagram Business account first.' })
     return null
   }
   return { sessionId, session, account: session.instagramAccount }
+}
+
+async function graphGet(pathname, params, timeoutMs = 15000) {
+  const url = new URL(`https://graph.facebook.com/${graphVersion}/${pathname.replace(/^\/+/, '')}`)
+  url.search = new URLSearchParams(params).toString()
+  const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) })
+  const payload = await response.json().catch(() => ({}))
+  return { response, payload }
+}
+
+function metaError(payload, fallback) {
+  const message = payload?.error?.message
+  return typeof message === 'string' && message ? message : fallback
 }
 
 app.disable('x-powered-by')
@@ -113,7 +128,13 @@ app.get('/api/instagram/status', (req, res) => {
     session.credits = { credits_remaining: 10, plan_type: 'free' }
   }
   res.setHeader('Cache-Control', 'no-store')
-  res.json({ configured: Boolean(appId && appSecret), connected: Boolean(account), account: account ? { username: account.username, accountType: account.accountType, userId: account.userId } : null })
+  res.json({
+    configured: Boolean(appId && appSecret),
+    connected: Boolean(account),
+    account: account
+      ? { username: account.username, accountType: account.accountType, userId: account.userId, pageName: account.pageName || '' }
+      : null,
+  })
 })
 
 app.get('/api/user/credits', (req, res) => {
@@ -147,12 +168,15 @@ app.get('/api/instagram/login', (req, res) => {
   const state = randomBytes(32).toString('base64url')
   session.oauthState = state
   session.oauthStateExpiresAt = Date.now() + oauthStateTtlMs
-  const authorizationUrl = new URL('https://www.instagram.com/oauth/authorize')
+  // Meta's OAuth dialog (Facebook Login for Business). This is what issues the
+  // code we exchange for a user token, then a Page token we can read DMs with.
+  const authorizationUrl = new URL(`https://www.facebook.com/${graphVersion}/dialog/oauth`)
   authorizationUrl.searchParams.set('client_id', appId)
   authorizationUrl.searchParams.set('redirect_uri', redirectUri)
   authorizationUrl.searchParams.set('response_type', 'code')
   authorizationUrl.searchParams.set('scope', scopes.join(','))
   authorizationUrl.searchParams.set('state', state)
+  res.setHeader('Cache-Control', 'no-store')
   res.redirect(302, authorizationUrl.toString())
 })
 
@@ -167,7 +191,8 @@ app.get('/api/instagram/callback', async (req, res) => {
   delete session?.oauthStateExpiresAt
 
   if (typeof req.query.error === 'string') {
-    return res.redirect(`/?instagram_error=${encodeURIComponent(req.query.error_description || req.query.error)}`)
+    const reason = req.query.error === 'access_denied' ? 'denied' : 'connection_failed'
+    return res.redirect(`/?instagram_error=${reason}`)
   }
   if (!session || typeof returnedState !== 'string' || typeof savedState !== 'string' || typeof savedStateExpiresAt !== 'number' || savedStateExpiresAt < Date.now() || returnedState.length !== savedState.length || !timingSafeEqual(Buffer.from(returnedState), Buffer.from(savedState))) {
     return res.status(400).send('Instagram login could not be verified. Start the connection again.')
@@ -177,43 +202,65 @@ app.get('/api/instagram/callback', async (req, res) => {
   }
 
   try {
-    const form = new URLSearchParams({
+    const tokenUrl = new URL(`https://graph.facebook.com/${graphVersion}/oauth/access_token`)
+    tokenUrl.search = new URLSearchParams({
       client_id: appId,
       client_secret: appSecret,
-      grant_type: 'authorization_code',
       redirect_uri: redirectUri,
-      code: req.query.code.replace(/#_$/, ''),
+      code: req.query.code,
+    }).toString()
+    const tokenResponse = await fetch(tokenUrl, { signal: AbortSignal.timeout(15000) })
+    const shortLived = await tokenResponse.json().catch(() => ({}))
+    if (!tokenResponse.ok || typeof shortLived.access_token !== 'string') {
+      console.error('Facebook code exchange failed:', metaError(shortLived, 'unknown error'))
+      return res.redirect('/?instagram_error=token_exchange_failed')
+    }
+
+    let userAccessToken = shortLived.access_token
+    try {
+      const longLivedUrl = new URL(`https://graph.facebook.com/${graphVersion}/oauth/access_token`)
+      longLivedUrl.search = new URLSearchParams({
+        grant_type: 'fb_exchange_token',
+        client_id: appId,
+        client_secret: appSecret,
+        fb_exchange_token: userAccessToken,
+      }).toString()
+      const longLivedResponse = await fetch(longLivedUrl, { signal: AbortSignal.timeout(15000) })
+      const longLived = await longLivedResponse.json().catch(() => ({}))
+      if (longLivedResponse.ok && typeof longLived.access_token === 'string') userAccessToken = longLived.access_token
+    } catch {
+      // Keep the short-lived token so this visit still works.
+    }
+
+    // Resolve the Facebook Page this Instagram account is linked to. Page tokens
+    // (not the user token) are what the Instagram messaging API accepts.
+    const { response: pagesResponse, payload: pages } = await graphGet('me/accounts', {
+      fields: 'id,name,access_token,instagram_business_account{id,username,account_type}',
+      limit: '100',
+      access_token: userAccessToken,
     })
-    const exchange = await fetch('https://api.instagram.com/oauth/access_token', { method: 'POST', body: form, signal: AbortSignal.timeout(15000) })
-    const shortLived = await exchange.json()
-    if (!exchange.ok || typeof shortLived.access_token !== 'string' || typeof shortLived.user_id !== 'number') {
-      throw new Error('Instagram authorization-code exchange failed.')
+    if (!pagesResponse.ok) {
+      console.error('Facebook pages fetch failed:', metaError(pages, 'unknown error'))
+      return res.redirect('/?instagram_error=pages_fetch_failed')
     }
+    const pageList = Array.isArray(pages.data) ? pages.data : []
+    if (pageList.length === 0) return res.redirect('/?instagram_error=no_pages')
+    const page = pageList.find((item) => item?.instagram_business_account?.id && item?.access_token)
+    if (!page) return res.redirect('/?instagram_error=no_instagram_account')
 
-    const longLivedUrl = new URL('https://graph.instagram.com/access_token')
-    longLivedUrl.search = new URLSearchParams({ grant_type: 'ig_exchange_token', client_secret: appSecret, access_token: shortLived.access_token }).toString()
-    const longLivedResponse = await fetch(longLivedUrl, { signal: AbortSignal.timeout(15000) })
-    const longLived = await longLivedResponse.json()
-    if (!longLivedResponse.ok || typeof longLived.access_token !== 'string') {
-      throw new Error('Instagram long-lived token exchange failed.')
-    }
-
-    const profileUrl = new URL('https://graph.instagram.com/me')
-    profileUrl.search = new URLSearchParams({ fields: 'user_id,username,account_type', access_token: longLived.access_token }).toString()
-    const profileResponse = await fetch(profileUrl, { signal: AbortSignal.timeout(15000) })
-    const profile = await profileResponse.json()
-    const accountType = typeof profile.account_type === 'string' ? profile.account_type.toUpperCase() : ''
-    if (!profileResponse.ok || typeof profile.username !== 'string' || !['BUSINESS', 'CREATOR'].includes(accountType)) {
-      throw new Error('The connected account must be an Instagram Business or Creator account.')
-    }
-
+    const igAccount = page.instagram_business_account
     session.instagramAccount = {
-      userId: String(profile.user_id ?? shortLived.user_id),
-      username: profile.username,
-      accountType,
-      accessToken: longLived.access_token,
-      expiresAt: Date.now() + Number(longLived.expires_in || 5184000) * 1000,
+      userId: String(igAccount.id),
+      username: igAccount.username || page.name || 'instagram',
+      accountType: String(igAccount.account_type || 'BUSINESS').toUpperCase(),
+      pageId: String(page.id),
+      pageName: page.name || '',
+      pageAccessToken: page.access_token,
+      userAccessToken,
+      expiresAt: Date.now() + 55 * 24 * 60 * 60 * 1000,
     }
+    delete session.conversations
+    delete session.activeThread
     return res.redirect('/?instagram_connected=1')
   } catch (error) {
     console.error('Instagram OAuth callback failed:', error instanceof Error ? error.message : 'Unknown error')
@@ -242,54 +289,103 @@ app.get('/api/instagram/conversations', async (req, res) => {
   const auth = requireAuth(req, res)
   if (!auth) return
   try {
-    // For Instagram Business accounts, fetch conversations via Graph API
-    // Note: This requires proper permissions and may need page linking
-    const url = new URL(`https://graph.facebook.com/v18.0/${auth.account.userId}/conversations`)
-    url.searchParams.set('fields', 'id,participants,messages{message,from,created_time}')
-    url.searchParams.set('access_token', auth.account.accessToken)
-    
-    const response = await fetch(url, { signal: AbortSignal.timeout(15000) })
-    const data = await response.json()
-    
-    if (!response.ok) {
-      console.error('Conversations fetch failed:', data)
-      // Return empty array with helpful message if not configured properly
-      return res.json({ conversations: [], error: 'Unable to fetch conversations. Ensure your Instagram Business account is linked to a Facebook Page and has proper permissions.' })
+    const baseParams = {
+      platform: 'instagram',
+      limit: '30',
+      access_token: auth.account.pageAccessToken,
     }
-    
-    auth.session.conversations = data.data || []
+
+    // `snippet` is not available on every Graph version, so fall back gracefully.
+    let { response, payload } = await graphGet(`${auth.account.userId}/conversations`, {
+      ...baseParams,
+      fields: 'id,updated_time,snippet,participants',
+    })
+    if (!response.ok) {
+      const first = await graphGet(`${auth.account.userId}/conversations`, {
+        ...baseParams,
+        fields: 'id,updated_time,participants',
+      })
+      response = first.response
+      payload = first.payload
+    }
+
+    if (!response.ok) {
+      console.error('Conversations fetch failed:', metaError(payload, 'unknown error'))
+      return res.status(502).json({
+        conversations: [],
+        error: metaError(payload, 'Meta rejected the conversation request.'),
+        hint: 'The Instagram account must be a Business/Creator account linked to a Facebook Page you admin, and the app needs instagram_manage_messages approved.',
+      })
+    }
+
+    const ownUsername = String(auth.account.username || '').toLowerCase()
+    const conversations = (Array.isArray(payload.data) ? payload.data : []).map((conversation) => {
+      const participants = Array.isArray(conversation.participants?.data) ? conversation.participants.data : []
+      const other = participants.find((participant) => {
+        if (String(participant?.id) === auth.account.userId) return false
+        if (ownUsername && String(participant?.username || '').toLowerCase() === ownUsername) return false
+        return true
+      }) || participants[0] || {}
+      return {
+        id: String(conversation.id),
+        name: other.name || (other.username ? `@${other.username}` : 'Instagram user'),
+        username: other.username || '',
+        participantId: other.id ? String(other.id) : '',
+        snippet: typeof conversation.snippet === 'string' ? conversation.snippet : '',
+        updatedTime: conversation.updated_time || '',
+      }
+    })
+
+    auth.session.conversations = conversations
     res.setHeader('Cache-Control', 'no-store')
-    res.json({ conversations: data.data || [] })
+    return res.json({ conversations, account: { username: auth.account.username, igUserId: auth.account.userId } })
   } catch (error) {
-    console.error('Conversations fetch error:', error)
-    res.status(500).json({ conversations: [], error: 'Failed to fetch conversations' })
+    console.error('Conversations fetch error:', error instanceof Error ? error.message : error)
+    return res.status(500).json({ conversations: [], error: 'Failed to fetch conversations from Instagram.' })
   }
 })
 
 app.get('/api/instagram/messages/:threadId', async (req, res) => {
   const auth = requireAuth(req, res)
   if (!auth) return
+  const threadId = String(req.params.threadId || '')
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(threadId)) {
+    return res.status(400).json({ error: 'Invalid conversation id.' })
+  }
   try {
-    const { threadId } = req.params
-    const url = new URL(`https://graph.facebook.com/v18.0/${threadId}/messages`)
-    url.searchParams.set('fields', 'id,message,from,created_time')
-    url.searchParams.set('limit', '15')
-    url.searchParams.set('access_token', auth.account.accessToken)
-    
-    const response = await fetch(url, { signal: AbortSignal.timeout(15000) })
-    const data = await response.json()
-    
+    const { response, payload } = await graphGet(`${threadId}/messages`, {
+      fields: 'id,message,from{id,username,name},created_time',
+      limit: '20',
+      access_token: auth.account.pageAccessToken,
+    })
+
     if (!response.ok) {
-      console.error('Messages fetch failed:', data)
-      return res.status(500).json({ error: 'Failed to fetch messages' })
+      console.error('Messages fetch failed:', metaError(payload, 'unknown error'))
+      return res.status(502).json({ error: metaError(payload, 'Meta rejected the message request.') })
     }
-    
-    auth.session.activeThread = { threadId, messages: data.data || [] }
+
+    const ownUsername = String(auth.account.username || '').toLowerCase()
+    const messages = (Array.isArray(payload.data) ? payload.data : []).map((message) => {
+      const sender = message.from || {}
+      const fromMe = String(sender.id || '') === auth.account.userId
+        || Boolean(ownUsername) && String(sender.username || '').toLowerCase() === ownUsername
+      return {
+        id: String(message.id),
+        text: typeof message.message === 'string' ? message.message : '',
+        fromMe,
+        sender: { id: sender.id ? String(sender.id) : '', username: sender.username || '' },
+        createdAt: message.created_time || '',
+      }
+    })
+
+    // Newest first from Meta; the UI reads top-to-bottom.
+    messages.reverse()
+    auth.session.activeThread = { threadId, fetchedAt: Date.now(), count: messages.length }
     res.setHeader('Cache-Control', 'no-store')
-    res.json({ messages: data.data || [] })
+    return res.json({ threadId, messages })
   } catch (error) {
-    console.error('Messages fetch error:', error)
-    res.status(500).json({ error: 'Failed to fetch messages' })
+    console.error('Messages fetch error:', error instanceof Error ? error.message : error)
+    return res.status(500).json({ error: 'Failed to fetch messages from Instagram.' })
   }
 })
 
@@ -421,34 +517,51 @@ app.post('/api/instagram/send', async (req, res) => {
   if (!auth) return
   
   try {
-    const { threadId, message } = req.body
-    if (!threadId || !message) {
-      return res.status(400).json({ error: 'Thread ID and message required' })
+    const { threadId, recipientId, message } = req.body || {}
+    const text = typeof message === 'string' ? message.trim() : ''
+    if (!text || text.length > 1000) {
+      return res.status(400).json({ error: 'A message between 1 and 1000 characters is required.' })
     }
-    
-    const url = new URL(`https://graph.facebook.com/v18.0/${threadId}/messages`)
+
+    // The Instagram messaging API needs the recipient's IGSID, not the thread id.
+    let recipient = typeof recipientId === 'string' ? recipientId : ''
+    if (!recipient && typeof threadId === 'string' && Array.isArray(auth.session.conversations)) {
+      recipient = auth.session.conversations.find((conversation) => conversation.id === threadId)?.participantId || ''
+    }
+    if (!recipient) {
+      return res.status(400).json({
+        error: 'Missing recipient for this conversation. Reload the inbox so the participant id can be resolved.',
+        hint: 'Instagram only allows sends to a participant id returned by the conversations edge.',
+      })
+    }
+
+    const url = new URL(`https://graph.facebook.com/${graphVersion}/${auth.account.userId}/messages`)
+    url.searchParams.set('access_token', auth.account.pageAccessToken)
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        message: { text: message },
-        access_token: auth.account.accessToken
+        recipient: { id: recipient },
+        messaging_type: 'RESPONSE',
+        message: { text },
       }),
-      signal: AbortSignal.timeout(15000)
+      signal: AbortSignal.timeout(15000),
     })
-    
-    const data = await response.json()
-    
+
+    const data = await response.json().catch(() => ({}))
     if (!response.ok) {
-      console.error('Send message failed:', data)
-      return res.status(500).json({ error: 'Failed to send message' })
+      console.error('Send message failed:', metaError(data, 'unknown error'))
+      return res.status(502).json({
+        error: metaError(data, 'Meta rejected the message send.'),
+        hint: 'Instagram only permits replies within 24 hours of the last customer message.',
+      })
     }
-    
+
     res.setHeader('Cache-Control', 'no-store')
-    res.json({ success: true, messageId: data.message_id })
+    return res.json({ success: true, messageId: data.message_id || null, recipientId: recipient })
   } catch (error) {
-    console.error('Send message error:', error)
-    res.status(500).json({ error: 'Failed to send message' })
+    console.error('Send message error:', error instanceof Error ? error.message : error)
+    return res.status(500).json({ error: 'Failed to send message.' })
   }
 })
 

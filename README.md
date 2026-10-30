@@ -18,20 +18,41 @@ npm start      # requires SESSION_SECRET and INSTAGRAM_REDIRECT_URI
 
 ## Instagram Login setup
 
-The **Connect** button in the inbox starts Meta's Instagram OAuth flow. The app secret and access tokens never reach the browser: the server validates OAuth `state`, exchanges the code, and stores tokens in a signed HttpOnly session.
+The **Connect** button starts Meta's OAuth dialog and the server does the whole exchange. App secrets and tokens never reach the browser: the server validates OAuth `state`, trades the code for a user token, resolves the Facebook Page and its `instagram_business_account`, and keeps the resulting **Page access token** in a signed HttpOnly session.
 
-1. Create an app at [developers.facebook.com/apps](https://developers.facebook.com/apps) and add the **Instagram API with Instagram Login** product.
-2. In the app's Instagram settings, add this exact **Valid OAuth Redirect URI**:
-   `http://localhost:5175/api/instagram/callback`
-3. Copy `.env.example` to `.env` and fill in `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET` and `INSTAGRAM_REDIRECT_URI` (it must match step 2 exactly, including trailing path).
+Flow:
+
+1. `GET /api/instagram/login` → redirects to `https://www.facebook.com/{GRAPH_API_VERSION}/dialog/oauth` with `instagram_basic, instagram_manage_messages, pages_show_list, pages_read_engagement`.
+2. `GET /api/instagram/callback` → `oauth/access_token` → long-lived user token → `GET /me/accounts?fields=...,instagram_business_account{id,username}`.
+3. `GET /api/instagram/conversations` → `GET /{ig-business-id}/conversations?platform=instagram` for the inbox list.
+4. `GET /api/instagram/messages/:threadId` → last 20 messages of the selected thread.
+5. `POST /api/instagram/send` → `POST /{ig-business-id}/messages` with `recipient.id`, only after the user approves the draft.
+
+Configure in the [Meta app dashboard](https://developers.facebook.com/apps):
+
+1. Add the **Facebook Login** product and, under **Instagram**, the **Instagram API with Instagram Login** messaging permissions.
+2. Add this exact **Valid OAuth Redirect URI** (no trailing slash):
+   `http://localhost:5175/api/instagram/callback` — and for production `https://<your-app-domain>/api/instagram/callback`.
+3. Copy `.env.example` to `.env` and fill in `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`, `INSTAGRAM_REDIRECT_URI` (must match step 2 byte-for-byte).
 4. Run `npm run dev` and click **Connect**.
 
 Requirements and limits:
 
-- The connecting account must be an **Instagram Business or Creator account**; the server rejects personal accounts.
-- Scopes requested: `instagram_business_basic`, `instagram_business_manage_messages`.
-- The connection currently authorizes the account only — the inbox still shows demo messages. Reading/sending real DMs additionally requires Instagram messaging permissions, a webhook endpoint, and Meta App Review.
-- Production needs `SESSION_SECRET` (≥32 random chars) and a public `INSTAGRAM_REDIRECT_URI` matching the Meta dashboard.
+- The Instagram profile must be a **Business or Creator** account **linked to a Facebook Page** that you admin. The callback resolves the Page automatically; without one it returns `?instagram_error=no_instagram_account`.
+- `instagram_manage_messages` must be approved for the app (App Review) before Meta will return real DM threads and allow sends. Until then the inbox loads but Meta rejects the conversation request — the UI surfaces Meta's message.
+- Sends only work inside Instagram's 24-hour customer-message window.
+- Optional tuning: `GRAPH_API_VERSION` (default `v21.0`) and `LLM_MODEL`.
+- Production needs `SESSION_SECRET` (≥ 32 random chars) and a public `INSTAGRAM_REDIRECT_URI` matching the Meta dashboard.
+
+Troubleshooting (`?instagram_error=` codes shown as a toast):
+
+| code | meaning |
+| --- | --- |
+| `denied` | the user cancelled the dialog |
+| `token_exchange_failed` | app id/secret or redirect URI mismatch |
+| `pages_fetch_failed` | `pages_show_list` not granted |
+| `no_pages` | no Facebook Page on that account |
+| `no_instagram_account` | Page has no linked Instagram Business account |
 
 ---
 

@@ -11,6 +11,7 @@ type Contact = {
   time: string
   channel: string
   threadId?: string
+  participantId?: string
 }
 
 type Message = {
@@ -28,7 +29,18 @@ type ChatReport = {
 }
 
 type Filter = 'all' | 'unread' | 'starred'
-type InstagramStatus = { configured: boolean; connected: boolean; account: { username: string; accountType: string; userId?: string } | null }
+type InstagramStatus = { configured: boolean; connected: boolean; account: { username: string; accountType: string; userId?: string; pageName?: string } | null }
+
+type ApiConversation = {
+  id: string
+  name?: string
+  username?: string
+  participantId?: string
+  snippet?: string
+  updatedTime?: string
+}
+
+type ApiMessage = { id: string; text?: string; fromMe?: boolean; createdAt?: string }
 
 type ChatAnalysis = {
   match_interest_score: number
@@ -50,6 +62,8 @@ const contacts: Contact[] = [
   { id: 'sam', name: 'Sam Okafor', handle: '@samokafor', initials: 'SO', tone: 'green', preview: 'You: Saturday works for me', time: '3h', channel: 'Instagram' },
   { id: 'ella', name: 'Ella Brooks', handle: '@ellabrooks', initials: 'EB', tone: 'lavender', preview: 'Haha, I knew you would get it', time: 'Yesterday', channel: 'Instagram' },
 ]
+
+const emptyContact: Contact = { id: '', name: 'No conversation yet', handle: '', initials: 'IG', tone: 'rose', preview: '', time: '', channel: 'Instagram' }
 
 const intents = ['Serious love', 'Open relationship', 'Situationship', 'Casual dating', 'Friendship first', 'Still figuring it out']
 
@@ -103,11 +117,21 @@ function createReport(messages: Message[], contact: Contact, intent: string): Ch
   }
 }
 
+const oauthErrorMessages: Record<string, string> = {
+  denied: 'Instagram login was cancelled before it finished.',
+  token_exchange_failed: 'Meta rejected the login code. Check INSTAGRAM_APP_ID / INSTAGRAM_APP_SECRET.',
+  pages_fetch_failed: 'Could not read your Facebook Pages. Confirm you granted pages_show_list.',
+  no_pages: 'No Facebook Page found on this account. Link a Page to your Instagram professional account first.',
+  no_instagram_account: 'That Page has no linked Instagram Business account. Convert the Instagram profile to a professional account and connect it to the Page.',
+  connection_failed: 'Instagram connection did not complete. Please try again.',
+}
+
 function readOAuthResultToast(): string {
   try {
     const params = new URLSearchParams(window.location.search)
     if (params.get('instagram_connected') === '1') return 'Instagram account connected securely'
-    if (params.has('instagram_error')) return 'Instagram connection did not complete. Please try again.'
+    const error = params.get('instagram_error')
+    if (error) return oauthErrorMessages[error] ?? oauthErrorMessages.connection_failed
   } catch {
     // Ignore malformed query strings
   }
@@ -141,7 +165,7 @@ function App() {
   const [showMobileCoach] = useState(false)
   void showMobileCoach
 
-  const selected = realContacts.find((contact) => contact.id === selectedId) ?? realContacts[0]
+  const selected = realContacts.find((contact) => contact.id === selectedId) ?? realContacts[0] ?? emptyContact
   const messages = messagesByContact[selectedId] ?? []
   const visibleContacts = useMemo(() => realContacts.filter((contact) => {
     const matchesSearch = `${contact.name} ${contact.handle}`.toLowerCase().includes(search.toLowerCase())
@@ -185,41 +209,71 @@ function App() {
     }
   }, [instagramStatus.connected])
 
+  function showToast(message: string, duration = 3600) {
+    setToast(message)
+    window.setTimeout(() => setToast(''), duration)
+  }
+
+  async function loadThreadMessages(contact: Contact) {
+    if (!contact.threadId || !instagramStatus.connected) return
+    try {
+      const response = await fetch(`/api/instagram/messages/${encodeURIComponent(contact.threadId)}`, { credentials: 'same-origin' })
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        showToast(typeof data.error === 'string' ? data.error : 'Could not load this conversation.', 5000)
+        return
+      }
+      const loadedMessages: Message[] = (Array.isArray(data.messages) ? data.messages : []).map((message: ApiMessage) => ({
+        id: message.id,
+        from: message.fromMe ? 'you' : 'them',
+        text: message.text || '',
+        time: message.createdAt ? new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
+      }))
+      setMessagesByContact((current) => ({ ...current, [contact.id]: loadedMessages }))
+    } catch (error) {
+      console.error('Failed to load messages:', error)
+      showToast('Could not load messages from Instagram.', 4000)
+    }
+  }
+
   async function fetchConversations() {
     setLoadingConversations(true)
     try {
       const response = await fetch('/api/instagram/conversations', { credentials: 'same-origin' })
-      if (response.ok) {
-        const data = await response.json()
-        if (data.conversations && data.conversations.length > 0) {
-          // Convert API conversations to contacts format
-          const apiContacts: Contact[] = data.conversations.map((conv: any, idx: number) => {
-            const participant = conv.participants?.data?.find((p: any) => p.id !== instagramStatus.account?.username) || conv.participants?.data?.[0]
-            const name = participant?.name || participant?.username || `User ${idx + 1}`
-            const username = participant?.username || `user${idx + 1}`
-            const initials = name.split(' ').map((n: string) => n[0]).join('').substring(0, 2).toUpperCase()
-            const tones = ['rose', 'blue', 'gold', 'green', 'lavender']
-            return {
-              id: conv.id || `conv-${idx}`,
-              name: name,
-              handle: `@${username}`,
-              initials: initials,
-              tone: tones[idx % tones.length],
-              preview: conv.messages?.data?.[0]?.message || 'No messages',
-              time: 'Recent',
-              channel: 'Instagram',
-              threadId: conv.id
-            }
-          })
-          setRealContacts(apiContacts)
-          if (apiContacts.length > 0) {
-            setSelectedId(apiContacts[0].id)
-          }
-        }
-        console.log('Conversations:', data)
+      const data = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        setRealContacts([])
+        const message = typeof data.error === 'string' ? data.error : 'Could not load Instagram conversations.'
+        const hint = typeof data.hint === 'string' ? ` ${data.hint}` : ''
+        showToast(`${message}${hint}`, 6500)
+        return
       }
+
+      const tones = ['rose', 'blue', 'gold', 'green', 'lavender']
+      const apiContacts: Contact[] = (Array.isArray(data.conversations) ? data.conversations : []).map((conversation: ApiConversation, index: number) => {
+        const name = conversation.name || conversation.username || 'Instagram user'
+        const initials = name.replace(/^@/, '').split(/[\s._-]+/).filter(Boolean).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || 'IG'
+        return {
+          id: conversation.id,
+          name,
+          handle: conversation.username ? `@${conversation.username}` : 'Instagram DM',
+          initials,
+          tone: tones[index % tones.length],
+          preview: conversation.snippet || 'Open this chat to load messages',
+          time: conversation.updatedTime ? new Date(conversation.updatedTime).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '',
+          channel: 'Instagram',
+          threadId: conversation.id,
+          participantId: conversation.participantId || '',
+        }
+      })
+
+      setRealContacts(apiContacts)
+      setSelectedId((current) => (apiContacts.some((contact) => contact.id === current) ? current : apiContacts[0]?.id ?? ''))
+      if (apiContacts.length > 0) void loadThreadMessages(apiContacts[0])
     } catch (error) {
       console.error('Failed to fetch conversations:', error)
+      setRealContacts([])
+      showToast('Could not reach Instagram. Please try again.', 4000)
     } finally {
       setLoadingConversations(false)
     }
@@ -270,26 +324,7 @@ function App() {
     setReport(null)
     setChatAnalysis(null)
     
-    // Load messages if we have threadId
-    if (contact.threadId && instagramStatus.connected) {
-      try {
-        const response = await fetch(`/api/instagram/messages/${contact.threadId}`, { credentials: 'same-origin' })
-        if (response.ok) {
-          const data = await response.json()
-          if (data.messages && data.messages.length > 0) {
-            const loadedMessages: Message[] = data.messages.map((msg: any, idx: number) => ({
-              id: msg.id || `msg-${idx}`,
-              from: msg.from?.id === instagramStatus.account?.userId ? 'you' : 'them',
-              text: msg.message || '',
-              time: msg.created_time ? new Date(msg.created_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            })).reverse()
-            setMessagesByContact((current) => ({ ...current, [contact.id]: loadedMessages }))
-          }
-        }
-      } catch (error) {
-        console.error('Failed to load messages:', error)
-      }
-    }
+    await loadThreadMessages(contact)
   }
 
   async function analyzeChat() {
@@ -354,10 +389,11 @@ function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'same-origin',
-          body: JSON.stringify({ threadId: contact.threadId, message: text })
+          body: JSON.stringify({ threadId: contact.threadId, recipientId: contact.participantId, message: text })
         })
         if (!response.ok) {
-          throw new Error('Failed to send')
+          const data = await response.json().catch(() => ({}))
+          throw new Error(typeof data.hint === 'string' ? data.hint : typeof data.error === 'string' ? data.error : 'Failed to send message')
         }
       }
       
@@ -368,8 +404,7 @@ function App() {
       window.setTimeout(() => setToast(''), 2600)
     } catch (error) {
       console.error('Send error:', error)
-      setToast('Failed to send message')
-      window.setTimeout(() => setToast(''), 2600)
+      showToast(error instanceof Error ? error.message : 'Failed to send message', 5000)
     } finally {
       setSending(false)
     }
@@ -456,9 +491,10 @@ function App() {
                   <span className="contact-copy"><span className="contact-name-line"><strong>{contact.name}</strong><time>{contact.time}</time></span><span className="contact-preview">{contact.preview}</span><span className="contact-channel"><Icon name="instagram" size={11} /> Instagram</span></span>
                   <button type="button" className={`star-toggle ${starred.has(contact.id) ? 'is-starred' : ''}`} aria-label={starred.has(contact.id) ? `Unstar ${contact.name}` : `Star ${contact.name}`} aria-pressed={starred.has(contact.id)} onClick={(event) => { event.stopPropagation(); toggleStar(contact.id) }}>✦</button>
                 </div>
-              )) : <div className="empty-contacts"><span>Nothing here just yet</span><small>Connect Instagram to see conversations.</small></div>}
+              )) : <div className="empty-contacts"><span>{loadingConversations ? 'Syncing your inbox…' : instagramStatus.connected ? 'No Instagram DMs yet' : 'Nothing here just yet'}</span><small>{instagramStatus.connected ? 'New Instagram conversations appear here automatically.' : 'Connect Instagram to see conversations.'}</small></div>}
             </div>
             <div className="inbox-footer"><span className="footer-status-dot" />{instagramStatus.connected ? (loadingConversations ? 'Syncing...' : 'Live from Instagram') : 'Demo mode'}</div>
+            {instagramStatus.connected && <button type="button" className="refresh-inbox-button" onClick={() => void fetchConversations()} disabled={loadingConversations}>↻ Refresh inbox</button>}
           </section>
           {mobileInboxOpen && <button className="mobile-inbox-scrim" onClick={() => setMobileInboxOpen(false)} aria-label="Close inbox overlay" />}
 
