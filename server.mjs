@@ -13,12 +13,13 @@ const isProduction = process.env.NODE_ENV === 'production'
 const appId = process.env.INSTAGRAM_APP_ID
 const appSecret = process.env.INSTAGRAM_APP_SECRET
 const redirectUri = process.env.INSTAGRAM_REDIRECT_URI || `http://localhost:${port}/api/instagram/callback`
-const scopes = ['instagram_business_basic', 'instagram_business_manage_messages']
+const scopes = ['instagram_basic', 'instagram_manage_messages', 'pages_show_list', 'pages_read_engagement']
 const cookieName = 'muse_oauth_session'
 const sessionTtlMs = 60 * 24 * 60 * 60 * 1000
 const oauthStateTtlMs = 10 * 60 * 1000
 const sessions = new Map()
 const sessionSecret = process.env.SESSION_SECRET || randomBytes(32).toString('hex')
+const llmApiKey = process.env.OPENAI_API_KEY || process.env.LLM_API_KEY
 
 if (isProduction && (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32)) {
   throw new Error('Set SESSION_SECRET to a random value of at least 32 characters in production.')
@@ -76,8 +77,19 @@ function requireConfigured(res) {
   return false
 }
 
+function requireAuth(req, res) {
+  const sessionId = getSessionId(req)
+  const session = sessionId ? sessions.get(sessionId) : null
+  if (!session?.instagramAccount?.accessToken) {
+    res.status(401).json({ error: 'Not connected to Instagram' })
+    return null
+  }
+  return { sessionId, session, account: session.instagramAccount }
+}
+
 app.disable('x-powered-by')
 app.set('trust proxy', isProduction ? 1 : false)
+app.use(express.json())
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff')
   res.setHeader('Referrer-Policy', 'no-referrer')
@@ -181,10 +193,207 @@ app.post('/api/instagram/disconnect', (req, res) => {
       delete session.instagramAccount
       delete session.oauthState
       delete session.oauthStateExpiresAt
+      delete session.conversations
+      delete session.activeThread
     }
   }
   res.setHeader('Cache-Control', 'no-store')
   res.json({ connected: false })
+})
+
+app.get('/api/instagram/conversations', async (req, res) => {
+  const auth = requireAuth(req, res)
+  if (!auth) return
+  try {
+    // For Instagram Business accounts, fetch conversations via Graph API
+    // Note: This requires proper permissions and may need page linking
+    const url = new URL(`https://graph.facebook.com/v18.0/${auth.account.userId}/conversations`)
+    url.searchParams.set('fields', 'id,participants,messages{message,from,created_time}')
+    url.searchParams.set('access_token', auth.account.accessToken)
+    
+    const response = await fetch(url, { signal: AbortSignal.timeout(15000) })
+    const data = await response.json()
+    
+    if (!response.ok) {
+      console.error('Conversations fetch failed:', data)
+      // Return empty array with helpful message if not configured properly
+      return res.json({ conversations: [], error: 'Unable to fetch conversations. Ensure your Instagram Business account is linked to a Facebook Page and has proper permissions.' })
+    }
+    
+    auth.session.conversations = data.data || []
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ conversations: data.data || [] })
+  } catch (error) {
+    console.error('Conversations fetch error:', error)
+    res.status(500).json({ conversations: [], error: 'Failed to fetch conversations' })
+  }
+})
+
+app.get('/api/instagram/messages/:threadId', async (req, res) => {
+  const auth = requireAuth(req, res)
+  if (!auth) return
+  try {
+    const { threadId } = req.params
+    const url = new URL(`https://graph.facebook.com/v18.0/${threadId}/messages`)
+    url.searchParams.set('fields', 'id,message,from,created_time')
+    url.searchParams.set('limit', '15')
+    url.searchParams.set('access_token', auth.account.accessToken)
+    
+    const response = await fetch(url, { signal: AbortSignal.timeout(15000) })
+    const data = await response.json()
+    
+    if (!response.ok) {
+      console.error('Messages fetch failed:', data)
+      return res.status(500).json({ error: 'Failed to fetch messages' })
+    }
+    
+    auth.session.activeThread = { threadId, messages: data.data || [] }
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ messages: data.data || [] })
+  } catch (error) {
+    console.error('Messages fetch error:', error)
+    res.status(500).json({ error: 'Failed to fetch messages' })
+  }
+})
+
+app.post('/api/analyze-chat', async (req, res) => {
+  const auth = requireAuth(req, res)
+  if (!auth) return
+  
+  try {
+    const { messages, goal } = req.body
+    if (!Array.isArray(messages)) {
+      return res.status(400).json({ error: 'Messages array required' })
+    }
+    
+    const chatContext = messages.map(m => `${m.from === 'you' ? 'User' : 'Match'}: ${m.text}`).join('\n')
+    
+    const prompt = `You are SoulSync, an AI dating and communication coach specializing in Gen-Z dating psychology with Telugu-English youth slang awareness.
+
+Analyze this Instagram chat conversation and provide strategic advice based on the user's relationship goal: ${goal || 'Serious love'}
+
+Chat context:
+${chatContext}
+
+Provide a response in this exact JSON format:
+{
+  "match_interest_score": <number 0-100>,
+  "psychology_analysis": "<detailed analysis of match's psychology, interest level, and motivations>",
+  "suggested_reply": "<strategic witty response matching modern youth conversation with appropriate Telugu-English slang if natural>",
+  "timing_advice": "<advice on when and how to reply>"
+}
+
+Rules:
+1. Analyze psychological state, interest level (High/Medium/Low), and reply timing
+2. Generate strategic, witty suggested response matching modern youth conversation (Telugu-English slang)
+3. Be authentic and helpful, not manipulative
+4. Consider the relationship goal when crafting advice`
+
+    let analysisResult
+    if (llmApiKey) {
+      try {
+        const llmResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${llmApiKey}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            model: 'gpt-4o-mini',
+            messages: [
+              { role: 'system', content: 'You are a helpful dating coach AI. Always respond with valid JSON.' },
+              { role: 'user', content: prompt }
+            ],
+            temperature: 0.7,
+            max_tokens: 500
+          }),
+          signal: AbortSignal.timeout(30000)
+        })
+        
+        if (llmResponse.ok) {
+          const llmData = await llmResponse.json()
+          const content = llmData.choices?.[0]?.message?.content
+          if (content) {
+            analysisResult = JSON.parse(content)
+          }
+        }
+      } catch (llmError) {
+        console.error('LLM API error:', llmError)
+      }
+    }
+    
+    // Fallback analysis if LLM fails
+    if (!analysisResult) {
+      const theirMessages = messages.filter(m => m.from === 'them')
+      const questions = theirMessages.filter(m => m.text?.includes('?')).length
+      const score = Math.min(95, Math.max(40, 60 + questions * 10))
+      
+      analysisResult = {
+        match_interest_score: score,
+        psychology_analysis: `Based on the conversation, there's ${score > 70 ? 'good' : 'moderate'} interest. ${questions > 0 ? 'They\'re asking questions showing curiosity.' : 'Keep engaging to build more interest.'} For a ${goal || 'Serious love'} goal, focus on building emotional connection.`,
+        suggested_reply: goal === 'Casual dating' ? "ayyo nice! spill the tea, what made you pick this spot?" : goal === 'Serious love' ? "that sounds really sweet yaar. tell me more about what you love about it" : "sounds interesting ra! what got you into that?",
+        timing_advice: "Reply within 2-4 hours to maintain good momentum without seeming too eager."
+      }
+    }
+    
+    res.setHeader('Cache-Control', 'no-store')
+    res.json(analysisResult)
+  } catch (error) {
+    console.error('Analyze chat error:', error)
+    res.status(500).json({ error: 'Failed to analyze chat' })
+  }
+})
+
+app.post('/api/instagram/send', async (req, res) => {
+  const auth = requireAuth(req, res)
+  if (!auth) return
+  
+  try {
+    const { threadId, message } = req.body
+    if (!threadId || !message) {
+      return res.status(400).json({ error: 'Thread ID and message required' })
+    }
+    
+    const url = new URL(`https://graph.facebook.com/v18.0/${threadId}/messages`)
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: { text: message },
+        access_token: auth.account.accessToken
+      }),
+      signal: AbortSignal.timeout(15000)
+    })
+    
+    const data = await response.json()
+    
+    if (!response.ok) {
+      console.error('Send message failed:', data)
+      return res.status(500).json({ error: 'Failed to send message' })
+    }
+    
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ success: true, messageId: data.message_id })
+  } catch (error) {
+    console.error('Send message error:', error)
+    res.status(500).json({ error: 'Failed to send message' })
+  }
+})
+
+app.post('/api/instagram/cleanup', (req, res) => {
+  const sessionId = getSessionId(req)
+  if (sessionId) {
+    const session = sessions.get(sessionId)
+    if (session) {
+      delete session.conversations
+      delete session.activeThread
+      delete session.chatData
+      // Clear all cached data
+      sessions.set(sessionId, { expiresAt: session.expiresAt }) // Keep session alive but clear data
+    }
+  }
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ success: true, message: 'Session data cleared' })
 })
 
 if (isProduction) {
@@ -207,4 +416,4 @@ if (isProduction) {
   })
 }
 
-app.listen(port, () => console.log(`Muse server listening on http://localhost:${port}`))
+app.listen(port, () => console.log(`SoulSync server listening on http://localhost:${port}`))

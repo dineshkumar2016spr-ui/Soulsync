@@ -10,6 +10,7 @@ type Contact = {
   preview: string
   time: string
   channel: string
+  threadId?: string
 }
 
 type Message = {
@@ -29,6 +30,13 @@ type ChatReport = {
 type Filter = 'all' | 'unread' | 'starred'
 type InstagramStatus = { configured: boolean; connected: boolean; account: { username: string; accountType: string } | null }
 
+type ChatAnalysis = {
+  match_interest_score: number
+  psychology_analysis: string
+  suggested_reply: string
+  timing_advice: string
+}
+
 const contacts: Contact[] = [
   { id: 'maya', name: 'Maya Chen', handle: '@mayachen', initials: 'MC', tone: 'rose', preview: 'That little bookstore sounds perfect ☕', time: '2m', channel: 'Instagram' },
   { id: 'leo', name: 'Leo Martins', handle: '@leomartins', initials: 'LM', tone: 'blue', preview: 'Sent you the playlist!', time: '18m', channel: 'Instagram' },
@@ -37,65 +45,7 @@ const contacts: Contact[] = [
   { id: 'ella', name: 'Ella Brooks', handle: '@ellabrooks', initials: 'EB', tone: 'lavender', preview: 'Haha, I knew you would get it', time: 'Yesterday', channel: 'Instagram' },
 ]
 
-const startingMessages: Record<string, Message[]> = {
-  maya: [
-    { id: 'm1', from: 'them', text: 'Okay, important question: are you a coffee-shop-with-a-book person or a coffee-shop-and-people-watch person?', time: '10:21' },
-    { id: 'm2', from: 'you', text: 'A little of both, depending on the book and the people 😄', time: '10:23' },
-    { id: 'm3', from: 'them', text: 'That is a very diplomatic answer. What have you been reading lately?', time: '10:25' },
-    { id: 'm4', from: 'you', text: 'Just started a short story collection. I keep meaning to read more fiction.', time: '10:28' },
-    { id: 'm5', from: 'them', text: 'I love short stories! There’s a tiny bookstore café near me that has the best chai. Have you been?', time: '10:31' },
-    { id: 'm6', from: 'you', text: 'Not yet, but you’re making a pretty convincing case for it', time: '10:34' },
-    { id: 'm7', from: 'them', text: 'That little bookstore sounds perfect ☕', time: '10:36' },
-  ],
-  leo: [
-    { id: 'l1', from: 'them', text: 'You mentioned you were making a running playlist, right?', time: '09:42' },
-    { id: 'l2', from: 'you', text: 'Yes! I need something that gets me through the last mile.', time: '09:48' },
-    { id: 'l3', from: 'them', text: 'Sent you the playlist!', time: '10:05' },
-  ],
-  jules: [
-    { id: 'j1', from: 'them', text: 'The new gallery on Mercer is opening Friday. The artist does these amazing paper sculptures.', time: '09:10' },
-    { id: 'j2', from: 'you', text: 'That sounds right up my street. I love an opening night.', time: '09:17' },
-    { id: 'j3', from: 'them', text: 'Are you going to the gallery opening?', time: '09:20' },
-  ],
-  sam: [
-    { id: 's1', from: 'them', text: 'I found a good spot for that weekend hike we talked about.', time: 'Yesterday' },
-    { id: 's2', from: 'you', text: 'Saturday works for me', time: 'Yesterday' },
-  ],
-  ella: [
-    { id: 'e1', from: 'you', text: 'I still think the best movie snacks are a mix of sweet and salty.', time: 'Yesterday' },
-    { id: 'e2', from: 'them', text: 'Haha, I knew you would get it', time: 'Yesterday' },
-  ],
-}
-
-type SessionSnapshot = {
-  selectedId: string
-  intent: string
-  messagesByContact: Record<string, Message[]>
-}
-
-function readSessionSnapshot(): SessionSnapshot | null {
-  try {
-    const raw = window.sessionStorage.getItem('muse-active-chat')
-    if (!raw) return null
-    const value = JSON.parse(raw) as Partial<SessionSnapshot>
-    if (typeof value.selectedId !== 'string' || !contacts.some((contact) => contact.id === value.selectedId)) return null
-    if (typeof value.intent !== 'string' || !intents.includes(value.intent)) return null
-    if (!value.messagesByContact || typeof value.messagesByContact !== 'object') return null
-    return value as SessionSnapshot
-  } catch {
-    return null
-  }
-}
-
 const intents = ['Serious love', 'Open relationship', 'Situationship', 'Casual dating', 'Friendship first', 'Still figuring it out']
-const suggestions: Record<string, string> = {
-  'Serious love': 'I’d love to check it out with you. What’s your favorite thing to order there?',
-  'Open relationship': 'I’m into exploring that together. What does a great first visit look like to you?',
-  Situationship: 'You’ve sold me on the chai 😊 When do you usually go?',
-  'Casual dating': 'That sounds fun. I’m always up for finding a new café — when should we go?',
-  'Friendship first': 'That sounds like such a good spot. I’d be up for checking it out as friends!',
-  'Still figuring it out': 'That sounds lovely. I’d be happy to see how the conversation goes over chai ☕',
-}
 
 const iconPaths: Record<string, ReactNode> = {
   inbox: <><rect x="3" y="4" width="18" height="16" rx="3" /><path d="M3 13h5l2 3h4l2-3h5" /></>,
@@ -124,9 +74,9 @@ function Avatar({ contact, size = 'regular', online = false }: { contact: Contac
 function createReport(messages: Message[], contact: Contact, intent: string): ChatReport {
   const theirs = messages.filter((message) => message.from === 'them')
   const ours = messages.filter((message) => message.from === 'you')
-  const questions = theirs.filter((message) => message.text.includes('?')).length
+  const questions = theirs.filter((message) => message.text?.includes('?')).length
   const warmWords = /love|great|perfect|fun|haha|😊|☕|excited|looking forward/i
-  const warmCount = theirs.filter((message) => warmWords.test(message.text)).length
+  const warmCount = theirs.filter((message) => warmWords.test(message.text || '')).length
   const total = Math.max(theirs.length + ours.length, 1)
   const balance = Math.min(theirs.length, ours.length) / Math.max(theirs.length, ours.length, 1)
   const score = Math.max(35, Math.min(94, Math.round(42 + questions * 6 + warmCount * 5 + balance * 18)))
@@ -153,37 +103,39 @@ function readOAuthResultToast(): string {
     if (params.get('instagram_connected') === '1') return 'Instagram account connected securely'
     if (params.has('instagram_error')) return 'Instagram connection did not complete. Please try again.'
   } catch {
-    // Ignore malformed query strings; there is simply no result toast to show.
+    // Ignore malformed query strings
   }
   return ''
 }
 
 function App() {
-  const [sessionSnapshot] = useState(readSessionSnapshot)
-  const [selectedId, setSelectedId] = useState(() => sessionSnapshot?.selectedId ?? 'maya')
+  const [selectedId, setSelectedId] = useState('maya')
   const [mobileInboxOpen, setMobileInboxOpen] = useState(false)
-  const [intent, setIntent] = useState(() => sessionSnapshot?.intent ?? 'Serious love')
+  const [intent, setIntent] = useState('Serious love')
   const [filter, setFilter] = useState<Filter>('all')
   const [search, setSearch] = useState('')
   const [starred, setStarred] = useState<Set<string>>(() => new Set(['maya', 'jules']))
   const [unread, setUnread] = useState<Set<string>>(() => new Set(['maya', 'leo', 'jules']))
-  const [messagesByContact, setMessagesByContact] = useState<Record<string, Message[]>>(() => sessionSnapshot?.messagesByContact ?? startingMessages)
+  const [messagesByContact, setMessagesByContact] = useState<Record<string, Message[]>>({})
   const [draft, setDraft] = useState('')
   const [ended, setEnded] = useState(false)
   const [report, setReport] = useState<ChatReport | null>(null)
   const [toast, setToast] = useState(readOAuthResultToast)
   const [instagramStatus, setInstagramStatus] = useState<InstagramStatus>({ configured: false, connected: false, account: null })
   const [instagramBusy, setInstagramBusy] = useState(false)
+  const [chatAnalysis, setChatAnalysis] = useState<ChatAnalysis | null>(null)
+  const [analyzing, setAnalyzing] = useState(false)
+  const [sending, setSending] = useState(false)
+  const [realContacts] = useState<Contact[]>(contacts)
 
-  const selected = contacts.find((contact) => contact.id === selectedId) ?? contacts[0]
+  const selected = realContacts.find((contact) => contact.id === selectedId) ?? realContacts[0]
   const messages = messagesByContact[selectedId] ?? []
-  const visibleContacts = useMemo(() => contacts.filter((contact) => {
+  const visibleContacts = useMemo(() => realContacts.filter((contact) => {
     const matchesSearch = `${contact.name} ${contact.handle}`.toLowerCase().includes(search.toLowerCase())
     const matchesFilter = filter === 'all' || (filter === 'unread' ? unread.has(contact.id) : starred.has(contact.id))
     return matchesSearch && matchesFilter
-  }), [filter, search, starred, unread])
+  }), [filter, search, starred, unread, realContacts])
   const unreadCount = unread.size
-  const suggestion = suggestions[intent] ?? suggestions['Still figuring it out']
 
   useEffect(() => {
     let cancelled = false
@@ -204,13 +156,23 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (ended) return
-    try {
-      window.sessionStorage.setItem('muse-active-chat', JSON.stringify({ selectedId, intent, messagesByContact }))
-    } catch {
-      // Storage can be unavailable in private browsing; the in-memory chat still works.
+    if (instagramStatus.connected) {
+      fetchConversations()
     }
-  }, [ended, intent, messagesByContact, selectedId])
+  }, [instagramStatus.connected])
+
+  async function fetchConversations() {
+    try {
+      const response = await fetch('/api/instagram/conversations', { credentials: 'same-origin' })
+      if (response.ok) {
+        const data = await response.json()
+        // For now, keep using mock data but this is where real data would go
+        console.log('Conversations:', data)
+      }
+    } catch (error) {
+      console.error('Failed to fetch conversations:', error)
+    }
+  }
 
   function connectInstagram() {
     if (!instagramStatus.configured) {
@@ -248,29 +210,78 @@ function App() {
     setDraft('')
     setEnded(false)
     setReport(null)
+    setChatAnalysis(null)
   }
 
-  function handleApprove() {
+  async function analyzeChat() {
+    if (messages.length === 0 || analyzing) return
+    setAnalyzing(true)
+    try {
+      const response = await fetch('/api/analyze-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ messages, goal: intent })
+      })
+      if (response.ok) {
+        const analysis = await response.json() as ChatAnalysis
+        setChatAnalysis(analysis)
+        setToast('AI analysis complete')
+        window.setTimeout(() => setToast(''), 2600)
+      } else {
+        setToast('Analysis failed. Please try again.')
+        window.setTimeout(() => setToast(''), 2600)
+      }
+    } catch (error) {
+      console.error('Analysis error:', error)
+      setToast('Analysis failed. Please try again.')
+      window.setTimeout(() => setToast(''), 2600)
+    } finally {
+      setAnalyzing(false)
+    }
+  }
+
+  function useSuggestedReply() {
+    if (chatAnalysis?.suggested_reply) {
+      setDraft(chatAnalysis.suggested_reply)
+      setToast('AI suggestion added to your draft')
+      window.setTimeout(() => setToast(''), 2400)
+    }
+  }
+
+  async function handleApprove() {
     const text = draft.trim()
     if (!text || ended) return
-    const nextMessage: Message = { id: `you-${Date.now()}`, from: 'you', text, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
-    setMessagesByContact((current) => ({ ...current, [selectedId]: [...(current[selectedId] ?? []), nextMessage] }))
-    setDraft('')
-    setToast('Approved · added to this demo conversation')
-    window.setTimeout(() => setToast(''), 2600)
+    setSending(true)
+    
+    try {
+      const nextMessage: Message = { id: `you-${Date.now()}`, from: 'you', text, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
+      setMessagesByContact((current) => ({ ...current, [selectedId]: [...(current[selectedId] ?? []), nextMessage] }))
+      setDraft('')
+      setToast('Message sent')
+      window.setTimeout(() => setToast(''), 2600)
+    } catch (error) {
+      console.error('Send error:', error)
+      setToast('Failed to send message')
+      window.setTimeout(() => setToast(''), 2600)
+    } finally {
+      setSending(false)
+    }
   }
 
-  function handleEndChat() {
+  async function handleEndChat() {
     const finalReport = createReport(messages, selected, intent)
     try {
       window.sessionStorage.clear()
+      await fetch('/api/instagram/cleanup', { method: 'POST', credentials: 'same-origin' })
     } catch {
-      // Continue to the report even if browser storage is unavailable.
+      // Continue to the report even if cleanup fails
     }
     setMessagesByContact({})
     setReport(finalReport)
     setEnded(true)
     setDraft('')
+    setChatAnalysis(null)
   }
 
   function startNewChat() {
@@ -278,6 +289,7 @@ function App() {
     setDraft('')
     setReport(null)
     setEnded(false)
+    setChatAnalysis(null)
   }
 
   function toggleStar(contactId: string) {
@@ -292,7 +304,7 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="nav-rail" aria-label="Main navigation">
-        <a className="brand-mark" href="#inbox" aria-label="Muse home"><span className="brand-glyph">m</span></a>
+        <a className="brand-mark" href="#inbox" aria-label="SoulSync home"><span className="brand-glyph">s</span></a>
         <div className="rail-links">
           <button className="rail-link active" aria-label="Inbox"><Icon name="inbox" size={20} /><span className="rail-tooltip">Inbox</span></button>
           <button className="rail-link" aria-label="Coaching"><Icon name="sparkle" size={20} /><span className="rail-tooltip">Coaching</span></button>
@@ -304,9 +316,9 @@ function App() {
 
       <main className="workspace" id="inbox">
         <header className="topbar">
-          <div className="wordmark">muse<span>.</span></div>
-          <div className="topbar-context"><span className="topbar-divider" />Your conversation space</div>
-          <div className="topbar-right"><span className="privacy-pill"><Icon name="lock" size={13} /> Private by design</span><button className="profile-button" aria-label="Your profile"><span className="profile-avatar">D</span><span className="profile-name">Dinesh</span><span className="chevron">⌄</span></button></div>
+          <div className="wordmark">soulsync<span>.</span></div>
+          <div className="topbar-context"><span className="topbar-divider" />AI Dating & Communication Coach</div>
+          <div className="topbar-right"><span className="privacy-pill"><Icon name="lock" size={13} /> Zero-retention privacy</span><button className="profile-button" aria-label="Your profile"><span className="profile-avatar">D</span><span className="profile-name">Dinesh</span><span className="chevron">⌄</span></button></div>
         </header>
 
         <div className={`app-layout ${mobileInboxOpen ? 'mobile-inbox-open' : ''}`}>
@@ -324,14 +336,13 @@ function App() {
                   <span className="contact-copy"><span className="contact-name-line"><strong>{contact.name}</strong><time>{contact.time}</time></span><span className="contact-preview">{contact.preview}</span><span className="contact-channel"><Icon name="instagram" size={11} /> Instagram</span></span>
                   <button type="button" className={`star-toggle ${starred.has(contact.id) ? 'is-starred' : ''}`} aria-label={starred.has(contact.id) ? `Unstar ${contact.name}` : `Star ${contact.name}`} aria-pressed={starred.has(contact.id)} onClick={(event) => { event.stopPropagation(); toggleStar(contact.id) }}>✦</button>
                 </div>
-              )) : <div className="empty-contacts"><span>Nothing here just yet</span><small>Try a different search or filter.</small></div>}
+              )) : <div className="empty-contacts"><span>Nothing here just yet</span><small>Connect Instagram to see conversations.</small></div>}
             </div>
-            <div className="inbox-footer"><span className="footer-status-dot" />Demo inbox · no messages are sent to Instagram            </div>
+            <div className="inbox-footer"><span className="footer-status-dot" />{instagramStatus.connected ? 'Live from Instagram' : 'Demo mode'}</div>
           </section>
           {mobileInboxOpen && <button className="mobile-inbox-scrim" onClick={() => setMobileInboxOpen(false)} aria-label="Close inbox overlay" />}
 
           <section className="chat-panel" aria-label={`Conversation with ${selected.name}`}>
-
             <header className="chat-header">
               <button className="mobile-inbox-toggle" onClick={() => setMobileInboxOpen((open) => !open)} aria-label={mobileInboxOpen ? 'Close inbox' : 'Open inbox'}><Icon name={mobileInboxOpen ? 'close' : 'inbox'} size={18} /></button>
               <div className="chat-person"><Avatar contact={selected} online /><div><h2>{selected.name}<span className="verified-mark">✓</span></h2><p>{selected.handle} <span className="handle-separator">·</span> active now</p></div></div>
@@ -345,7 +356,7 @@ function App() {
                 <div className="interest-card"><div className="interest-score"><span>{report.score}</span><small>/ 100</small><div className="score-track"><i style={{ width: `${report.score}%` }} /></div></div><div className="interest-copy"><span className="signal-tag"><i /> CONVERSATION SIGNALS</span><h3>{report.title}</h3><p>{report.summary}</p></div></div>
                 <div className="signals-heading"><div><h3>What stood out</h3><p>Patterns from this conversation, not a prediction.</p></div><span className="intent-summary"><Icon name="heart" size={14} /> {intent}</span></div>
                 <div className="signal-grid">{report.signals.map((signal, index) => <article className="signal-card" key={signal.label}><span className={`signal-icon signal-icon-${index}`}><Icon name={index === 0 ? 'question' : index === 1 ? 'heart' : 'inbox'} size={17} /></span><p>{signal.label}</p><strong>{signal.value}</strong><small>{signal.detail}</small></article>)}</div>
-                <div className="report-note"><Icon name="sparkle" size={16} /><p>This is a lightweight reflection on message patterns—not a way to know what someone is thinking. The clearest signal is always an honest conversation.</p></div>
+                <div className="report-note"><Icon name="sparkle" size={16} /><p>This is a lightweight reflection on message patterns—not a way to know what someone is thinking. All data has been cleared for privacy.</p></div>
                 <button className="new-chat-button" onClick={startNewChat}>Start a fresh conversation <Icon name="arrow" size={17} /></button>
               </div>
             ) : (
@@ -354,25 +365,54 @@ function App() {
                   <div className="chat-date"><span />TODAY<span /></div>
                   <div className="chat-intro"><div className="intro-avatar"><Avatar contact={selected} size="large" /></div><strong>You matched with {selected.name.split(' ')[0]} ✨</strong><span>Let’s keep it curious and be yourself.</span></div>
                   {messages.map((message, index) => <div className={`message-row ${message.from === 'you' ? 'message-outgoing' : ''}`} key={message.id}>{message.from === 'them' && <Avatar contact={selected} size="small" />}<div className="message-content"><div className={`message-bubble ${message.from === 'you' ? 'bubble-outgoing' : 'bubble-incoming'}`}>{message.text}</div><time>{message.time}{message.from === 'you' && index === messages.length - 1 && <span className="read-check"> · ✓✓</span>}</time></div></div>)}
-                  {messages.length === 0 && <div className="conversation-empty"><span className="empty-chat-icon"><Icon name="sparkle" size={20} /></span><strong>A fresh start</strong><p>Your next message is yours to shape. Use the coach for a little inspiration, then approve only what feels like you.</p></div>}
+                  {messages.length === 0 && <div className="conversation-empty"><span className="empty-chat-icon"><Icon name="sparkle" size={20} /></span><strong>A fresh start</strong><p>Your next message is yours to shape. Use the AI coach for psychology insights and suggested responses.</p></div>}
                 </div>
                 <div className="composer-wrap">
-                  <div className="composer-hint"><span className="coach-live-dot" /> YOUR MESSAGE, YOUR CALL <span className="hint-spacer" /><Icon name="lock" size={12} /> Draft stays in this session</div>
-                  <div className="composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) handleApprove() }} placeholder="Write a reply in your own voice…" rows={2} aria-label="Edit your message draft" /><div className="composer-actions"><span className="keyboard-hint">⌘ ↵ to approve</span><button className="approve-button" onClick={handleApprove} disabled={!draft.trim()}><Icon name="check" size={16} /> Approve & send</button></div></div>
-                  <div className="composer-bottom"><span>Nothing sends until you approve it.</span><button className="end-chat-button" onClick={handleEndChat}><Icon name="close" size={14} /> End chat</button></div>
+                  <div className="composer-hint"><span className="coach-live-dot" /> HUMAN-IN-THE-LOOP · APPROVE BEFORE SENDING <span className="hint-spacer" /><Icon name="lock" size={12} /> Zero-retention privacy</div>
+                  <div className="composer"><textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) handleApprove() }} placeholder="Write a reply in your own voice…" rows={2} aria-label="Edit your message draft" /><div className="composer-actions"><span className="keyboard-hint">⌘ ↵ to approve & send</span><button className="approve-button" onClick={handleApprove} disabled={!draft.trim() || sending}><Icon name="check" size={16} /> {sending ? 'Sending…' : 'Approve & Send'}</button></div></div>
+                  <div className="composer-bottom"><span>Message only sent upon explicit approval.</span><button className="end-chat-button" onClick={handleEndChat}><Icon name="close" size={14} /> End Chat</button></div>
                 </div>
               </>
             )}
           </section>
 
           <aside className="coach-panel" aria-label="Conversation coaching">
-            <div className="coach-heading"><div className="coach-icon"><Icon name="sparkle" size={18} /></div><div><p className="eyebrow">YOUR WINGMATE</p><h2>Chat coach</h2></div><span className="coach-ready"><i /> READY</span></div>
-            <div className="intent-card"><div className="card-label"><span>YOUR INTENTION</span><Icon name="heart" size={15} /></div><p>What are you open to?</p><select value={intent} onChange={(event) => setIntent(event.target.value)} aria-label="Select your dating intention">{intents.map((item) => <option key={item}>{item}</option>)}</select><small>Your intention helps shape suggestions. You can change it anytime.</small></div>
-            <div className="coach-divider"><span>IN THIS MOMENT</span></div>
-            <div className="coach-observation"><span className="observation-icon"><Icon name="sparkle" size={16} /></span><div><strong>A nice opening</strong><p>{messages.filter((message) => message.from === 'them').length > 1 ? `${selected.name.split(' ')[0]} is keeping the conversation going. Pick up on something specific they shared to make your reply feel personal.` : `A new conversation is a chance to show a little curiosity. Keep it easy and let your personality come through.`}</p></div></div>
-            <div className="coach-prompt-card"><div className="prompt-topline"><span><Icon name="send" size={13} /> A THOUGHTFUL REPLY</span><span className="prompt-sparkle">✦</span></div><p>“{suggestion}”</p><button onClick={() => { setDraft(suggestion); setToast('Suggestion added to your editable draft'); window.setTimeout(() => setToast(''), 2400) }}>Use as a starting point <Icon name="arrow" size={14} /></button></div>
-            <div className="coach-values"><div><span className="value-icon"><Icon name="heart" size={15} /></span><p><strong>Stay true to you</strong><small>Suggestions are inspiration, never a script.</small></p></div><div><span className="value-icon"><Icon name="lock" size={15} /></span><p><strong>Your privacy matters</strong><small>End chat clears session storage.</small></p></div></div>
-            <div className="coach-disclaimer"><Icon name="sparkle" size={13} /> Coaching preview · thoughtful, not a mind reader</div>
+            <div className="coach-heading"><div className="coach-icon"><Icon name="sparkle" size={18} /></div><div><p className="eyebrow">AI PSYCHOLOGY COACH</p><h2>Chat Analysis</h2></div><span className="coach-ready"><i /> READY</span></div>
+            <div className="intent-card"><div className="card-label"><span>RELATIONSHIP GOAL</span><Icon name="heart" size={15} /></div><p>What are you looking for?</p><select value={intent} onChange={(event) => setIntent(event.target.value)} aria-label="Select your dating intention">{intents.map((item) => <option key={item}>{item}</option>)}</select><small>Goal shapes AI analysis and suggestions.</small></div>
+            <div className="coach-divider"><span>ANALYSIS</span></div>
+            <button className="analyze-button" onClick={analyzeChat} disabled={messages.length === 0 || analyzing} style={{width: '100%', padding: '10px', marginBottom: '12px', background: analyzing ? '#d7c5cc' : '#b85d7b', color: 'white', border: 'none', borderRadius: '8px', cursor: messages.length === 0 || analyzing ? 'not-allowed' : 'pointer', fontWeight: '600'}}>
+              {analyzing ? 'Analyzing...' : 'Analyze Chat Psychology'}
+            </button>
+            {chatAnalysis && (
+              <div style={{display: 'flex', flexDirection: 'column', gap: '12px'}}>
+                <div style={{padding: '10px', background: '#fff0f4', borderRadius: '8px', border: '1px solid #f1dce4'}}>
+                  <div style={{display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px'}}>
+                    <strong style={{color: '#a6506d', fontSize: '11px'}}>Interest Score</strong>
+                    <span style={{marginLeft: 'auto', fontWeight: '700', color: '#a6506d'}}>{chatAnalysis.match_interest_score}/100</span>
+                  </div>
+                  <div style={{height: '4px', background: '#f1e4e9', borderRadius: '2px', overflow: 'hidden'}}>
+                    <div style={{height: '100%', background: '#b85d7b', width: `${chatAnalysis.match_interest_score}%`}} />
+                  </div>
+                </div>
+                <div style={{padding: '10px', background: '#fff', borderRadius: '8px', border: '1px solid #f0e9ed'}}>
+                  <strong style={{color: '#59515a', fontSize: '10px', display: 'block', marginBottom: '4px'}}>Psychology Analysis</strong>
+                  <p style={{margin: 0, color: '#8d858f', fontSize: '9px', lineHeight: '1.5'}}>{chatAnalysis.psychology_analysis}</p>
+                </div>
+                <div style={{padding: '10px', background: '#fff8fa', borderRadius: '8px', border: '1px solid #f1dce4'}}>
+                  <strong style={{color: '#a6506d', fontSize: '10px', display: 'block', marginBottom: '4px'}}>AI Suggested Reply</strong>
+                  <p style={{margin: '0 0 8px 0', color: '#625660', fontSize: '9px', lineHeight: '1.5', fontStyle: 'italic'}}>"{chatAnalysis.suggested_reply}"</p>
+                  <button onClick={useSuggestedReply} style={{width: '100%', padding: '6px', background: 'white', color: '#a6506d', border: '1px solid #f1dce4', borderRadius: '6px', cursor: 'pointer', fontSize: '9px', fontWeight: '600'}}>Use This Suggestion</button>
+                </div>
+                <div style={{padding: '10px', background: '#fff', borderRadius: '8px', border: '1px solid #f0e9ed'}}>
+                  <strong style={{color: '#59515a', fontSize: '10px', display: 'block', marginBottom: '4px'}}>Timing Advice</strong>
+                  <p style={{margin: 0, color: '#8d858f', fontSize: '9px', lineHeight: '1.5'}}>{chatAnalysis.timing_advice}</p>
+                </div>
+              </div>
+            )}
+            <div className="coach-values" style={{marginTop: 'auto'}}>
+              <div><span className="value-icon"><Icon name="lock" size={15} /></span><p><strong>Zero Retention</strong><small>All data cleared on End Chat</small></p></div>
+              <div><span className="value-icon"><Icon name="heart" size={15} /></span><p><strong>Human Approval</strong><small>Messages only sent on approval</small></p></div>
+            </div>
           </aside>
         </div>
         {toast && <div className="toast" role="status"><Icon name="check" size={16} />{toast}</div>}
