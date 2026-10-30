@@ -100,7 +100,7 @@ app.get('/api/instagram/status', (req, res) => {
   const sessionId = getSessionId(req)
   const account = sessionId ? sessions.get(sessionId)?.instagramAccount : null
   res.setHeader('Cache-Control', 'no-store')
-  res.json({ configured: Boolean(appId && appSecret), connected: Boolean(account), account: account ? { username: account.username, accountType: account.accountType } : null })
+  res.json({ configured: Boolean(appId && appSecret), connected: Boolean(account), account: account ? { username: account.username, accountType: account.accountType, userId: account.userId } : null })
 })
 
 app.get('/api/instagram/login', (req, res) => {

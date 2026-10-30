@@ -28,7 +28,7 @@ type ChatReport = {
 }
 
 type Filter = 'all' | 'unread' | 'starred'
-type InstagramStatus = { configured: boolean; connected: boolean; account: { username: string; accountType: string } | null }
+type InstagramStatus = { configured: boolean; connected: boolean; account: { username: string; accountType: string; userId?: string } | null }
 
 type ChatAnalysis = {
   match_interest_score: number
@@ -126,7 +126,8 @@ function App() {
   const [chatAnalysis, setChatAnalysis] = useState<ChatAnalysis | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
   const [sending, setSending] = useState(false)
-  const [realContacts] = useState<Contact[]>(contacts)
+  const [realContacts, setRealContacts] = useState<Contact[]>(contacts)
+  const [loadingConversations, setLoadingConversations] = useState(false)
 
   const selected = realContacts.find((contact) => contact.id === selectedId) ?? realContacts[0]
   const messages = messagesByContact[selectedId] ?? []
@@ -162,15 +163,42 @@ function App() {
   }, [instagramStatus.connected])
 
   async function fetchConversations() {
+    setLoadingConversations(true)
     try {
       const response = await fetch('/api/instagram/conversations', { credentials: 'same-origin' })
       if (response.ok) {
         const data = await response.json()
-        // For now, keep using mock data but this is where real data would go
+        if (data.conversations && data.conversations.length > 0) {
+          // Convert API conversations to contacts format
+          const apiContacts: Contact[] = data.conversations.map((conv: any, idx: number) => {
+            const participant = conv.participants?.data?.find((p: any) => p.id !== instagramStatus.account?.username) || conv.participants?.data?.[0]
+            const name = participant?.name || participant?.username || `User ${idx + 1}`
+            const username = participant?.username || `user${idx + 1}`
+            const initials = name.split(' ').map((n: string) => n[0]).join('').substring(0, 2).toUpperCase()
+            const tones = ['rose', 'blue', 'gold', 'green', 'lavender']
+            return {
+              id: conv.id || `conv-${idx}`,
+              name: name,
+              handle: `@${username}`,
+              initials: initials,
+              tone: tones[idx % tones.length],
+              preview: conv.messages?.data?.[0]?.message || 'No messages',
+              time: 'Recent',
+              channel: 'Instagram',
+              threadId: conv.id
+            }
+          })
+          setRealContacts(apiContacts)
+          if (apiContacts.length > 0) {
+            setSelectedId(apiContacts[0].id)
+          }
+        }
         console.log('Conversations:', data)
       }
     } catch (error) {
       console.error('Failed to fetch conversations:', error)
+    } finally {
+      setLoadingConversations(false)
     }
   }
 
@@ -199,7 +227,7 @@ function App() {
     }
   }
 
-  function selectContact(contact: Contact) {
+  async function selectContact(contact: Contact) {
     setSelectedId(contact.id)
     setMobileInboxOpen(false)
     setUnread((current) => {
@@ -211,6 +239,27 @@ function App() {
     setEnded(false)
     setReport(null)
     setChatAnalysis(null)
+    
+    // Load messages if we have threadId
+    if (contact.threadId && instagramStatus.connected) {
+      try {
+        const response = await fetch(`/api/instagram/messages/${contact.threadId}`, { credentials: 'same-origin' })
+        if (response.ok) {
+          const data = await response.json()
+          if (data.messages && data.messages.length > 0) {
+            const loadedMessages: Message[] = data.messages.map((msg: any, idx: number) => ({
+              id: msg.id || `msg-${idx}`,
+              from: msg.from?.id === instagramStatus.account?.userId ? 'you' : 'them',
+              text: msg.message || '',
+              time: msg.created_time ? new Date(msg.created_time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            })).reverse()
+            setMessagesByContact((current) => ({ ...current, [contact.id]: loadedMessages }))
+          }
+        }
+      } catch (error) {
+        console.error('Failed to load messages:', error)
+      }
+    }
   }
 
   async function analyzeChat() {
@@ -255,10 +304,23 @@ function App() {
     setSending(true)
     
     try {
+      const contact = selected
+      if (contact.threadId && instagramStatus.connected) {
+        const response = await fetch('/api/instagram/send', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ threadId: contact.threadId, message: text })
+        })
+        if (!response.ok) {
+          throw new Error('Failed to send')
+        }
+      }
+      
       const nextMessage: Message = { id: `you-${Date.now()}`, from: 'you', text, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
       setMessagesByContact((current) => ({ ...current, [selectedId]: [...(current[selectedId] ?? []), nextMessage] }))
       setDraft('')
-      setToast('Message sent')
+      setToast('Message sent via Instagram')
       window.setTimeout(() => setToast(''), 2600)
     } catch (error) {
       console.error('Send error:', error)
@@ -338,7 +400,7 @@ function App() {
                 </div>
               )) : <div className="empty-contacts"><span>Nothing here just yet</span><small>Connect Instagram to see conversations.</small></div>}
             </div>
-            <div className="inbox-footer"><span className="footer-status-dot" />{instagramStatus.connected ? 'Live from Instagram' : 'Demo mode'}</div>
+            <div className="inbox-footer"><span className="footer-status-dot" />{instagramStatus.connected ? (loadingConversations ? 'Syncing...' : 'Live from Instagram') : 'Demo mode'}</div>
           </section>
           {mobileInboxOpen && <button className="mobile-inbox-scrim" onClick={() => setMobileInboxOpen(false)} aria-label="Close inbox overlay" />}
 
