@@ -37,6 +37,12 @@ type ChatAnalysis = {
   timing_advice: string
 }
 
+type UserCredits = {
+  credits_remaining: number
+  plan_type: 'free' | 'pro' | 'vip'
+  accepted_terms_at?: string
+}
+
 const contacts: Contact[] = [
   { id: 'maya', name: 'Maya Chen', handle: '@mayachen', initials: 'MC', tone: 'rose', preview: 'That little bookstore sounds perfect ☕', time: '2m', channel: 'Instagram' },
   { id: 'leo', name: 'Leo Martins', handle: '@leomartins', initials: 'LM', tone: 'blue', preview: 'Sent you the playlist!', time: '18m', channel: 'Instagram' },
@@ -128,6 +134,12 @@ function App() {
   const [sending, setSending] = useState(false)
   const [realContacts, setRealContacts] = useState<Contact[]>(contacts)
   const [loadingConversations, setLoadingConversations] = useState(false)
+  const [ageConsent, setAgeConsent] = useState(false)
+  const [termsConsent, setTermsConsent] = useState(false)
+  const [userCredits, setUserCredits] = useState<UserCredits>({ credits_remaining: 10, plan_type: 'free' })
+  const [showPricingModal, setShowPricingModal] = useState(false)
+  const [showMobileCoach] = useState(false)
+  void showMobileCoach
 
   const selected = realContacts.find((contact) => contact.id === selectedId) ?? realContacts[0]
   const messages = messagesByContact[selectedId] ?? []
@@ -147,6 +159,17 @@ function App() {
       })
       .then((status) => { if (!cancelled) setInstagramStatus(status) })
       .catch(() => { if (!cancelled) setInstagramStatus({ configured: false, connected: false, account: null }) })
+
+    fetch('/api/user/credits', { credentials: 'same-origin' })
+      .then(async (response) => {
+        if (response.ok) {
+          const data = await response.json()
+          return { credits_remaining: data.credits_remaining || 10, plan_type: (data.plan_type === 'pro' || data.plan_type === 'vip') ? data.plan_type : 'free' } as UserCredits
+        }
+        return { credits_remaining: 10, plan_type: 'free' } as UserCredits
+      })
+      .then((credits) => { if (!cancelled) setUserCredits(credits) })
+      .catch(() => {})
 
     const params = new URLSearchParams(window.location.search)
     if (params.has('instagram_connected') || params.has('instagram_error')) {
@@ -203,11 +226,18 @@ function App() {
   }
 
   function connectInstagram() {
+    if (!ageConsent || !termsConsent) {
+      setToast('Please accept the age verification and Terms of Service to continue.')
+      window.setTimeout(() => setToast(''), 3200)
+      return
+    }
     if (!instagramStatus.configured) {
       setToast('Instagram Login needs setup: set INSTAGRAM_APP_ID, INSTAGRAM_APP_SECRET and INSTAGRAM_REDIRECT_URI on the server.')
       window.setTimeout(() => setToast(''), 5200)
       return
     }
+    // Accept terms on backend
+    fetch('/api/user/accept-terms', { method: 'POST', credentials: 'same-origin' }).catch(() => {})
     setInstagramBusy(true)
     window.location.assign('/api/instagram/login')
   }
@@ -264,6 +294,12 @@ function App() {
 
   async function analyzeChat() {
     if (messages.length === 0 || analyzing) return
+    if (userCredits.credits_remaining <= 0 && userCredits.plan_type !== 'vip') {
+      setShowPricingModal(true)
+      setToast("You've used all free credits! Upgrade to continue.")
+      window.setTimeout(() => setToast(''), 3200)
+      return
+    }
     setAnalyzing(true)
     try {
       const response = await fetch('/api/analyze-chat', {
@@ -275,8 +311,16 @@ function App() {
       if (response.ok) {
         const analysis = await response.json() as ChatAnalysis
         setChatAnalysis(analysis)
+        // Update credits
+        if (userCredits.plan_type !== 'vip') {
+          setUserCredits(prev => ({ ...prev, credits_remaining: Math.max(0, prev.credits_remaining - 1) }))
+        }
         setToast('AI analysis complete')
         window.setTimeout(() => setToast(''), 2600)
+      } else if (response.status === 402) {
+        setShowPricingModal(true)
+        setToast('Insufficient credits. Please upgrade your plan.')
+        window.setTimeout(() => setToast(''), 3200)
       } else {
         setToast('Analysis failed. Please try again.')
         window.setTimeout(() => setToast(''), 2600)
@@ -380,13 +424,27 @@ function App() {
         <header className="topbar">
           <div className="wordmark">soulsync<span>.</span></div>
           <div className="topbar-context"><span className="topbar-divider" />AI Dating & Communication Coach</div>
-          <div className="topbar-right"><span className="privacy-pill"><Icon name="lock" size={13} /> Zero-retention privacy</span><button className="profile-button" aria-label="Your profile"><span className="profile-avatar">D</span><span className="profile-name">Dinesh</span><span className="chevron">⌄</span></button></div>
+          <div className="topbar-right"><span className="privacy-pill"><Icon name="lock" size={13} /> Zero-retention privacy</span><button onClick={() => setShowPricingModal(true)} style={{display: 'flex', alignItems: 'center', gap: '4px', padding: '6px 10px', background: userCredits.plan_type === 'vip' ? '#fbbf24' : userCredits.plan_type === 'pro' ? '#a78bfa' : '#f3f4f6', color: userCredits.plan_type === 'free' ? '#374151' : 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '11px', fontWeight: '600'}}><Icon name="sparkle" size={12} /> {userCredits.plan_type === 'vip' ? 'VIP' : userCredits.plan_type === 'pro' ? `Pro (${userCredits.credits_remaining})` : `Free (${userCredits.credits_remaining})`} </button><button className="profile-button" aria-label="Your profile"><span className="profile-avatar">D</span><span className="profile-name">Dinesh</span><span className="chevron">⌄</span></button></div>
         </header>
 
         <div className={`app-layout ${mobileInboxOpen ? 'mobile-inbox-open' : ''}`}>
           <section className="inbox-panel" aria-label="Social inbox">
             <div className="inbox-heading"><div><p className="eyebrow">YOUR SPACE</p><h1>Inbox <span className="count-pill">{unreadCount}</span></h1></div><button className="icon-button" aria-label="Inbox options"><Icon name="more" /></button></div>
-            <div className={`social-account ${instagramStatus.connected ? 'instagram-connected' : ''}`}><span className="instagram-mark"><Icon name="instagram" size={17} /></span><div className="social-label"><strong>{instagramStatus.connected && instagramStatus.account ? `@${instagramStatus.account.username}` : 'Instagram'}</strong><small>{instagramStatus.connected && instagramStatus.account ? `${instagramStatus.account.accountType.toLowerCase()} account connected` : 'Business or Creator account'}</small></div>{instagramStatus.connected ? <><span className="connected-dot" /><button type="button" className="instagram-connect-button disconnect-instagram-button" onClick={disconnectInstagram} disabled={instagramBusy}>Disconnect</button></> : <button type="button" className="instagram-connect-button" onClick={connectInstagram} disabled={instagramBusy}>{instagramBusy ? 'Opening…' : 'Connect'}</button>}</div>
+            <div className={`social-account ${instagramStatus.connected ? 'instagram-connected' : ''}`}><span className="instagram-mark"><Icon name="instagram" size={17} /></span><div className="social-label"><strong>{instagramStatus.connected && instagramStatus.account ? `@${instagramStatus.account.username}` : 'Instagram'}</strong><small>{instagramStatus.connected && instagramStatus.account ? `${instagramStatus.account.accountType.toLowerCase()} account connected` : 'Business or Creator account'}</small></div>{instagramStatus.connected ? <><span className="connected-dot" /><button type="button" className="instagram-connect-button disconnect-instagram-button" onClick={disconnectInstagram} disabled={instagramBusy}>Disconnect</button></> : <button type="button" className="instagram-connect-button" onClick={connectInstagram} disabled={instagramBusy || !ageConsent || !termsConsent}>{instagramBusy ? 'Opening…' : 'Connect'}</button>}</div>
+            {!instagramStatus.connected && (
+              <div style={{padding: '10px', background: '#fff7ed', borderRadius: '8px', marginBottom: '10px', border: '1px solid #fed7aa'}}>
+                <div style={{fontSize: '11px', fontWeight: '600', color: '#ea580c', marginBottom: '6px'}}>Legal Consent Required</div>
+                <label style={{display: 'flex', alignItems: 'flex-start', gap: '6px', fontSize: '10px', color: '#9a3412', marginBottom: '4px', cursor: 'pointer'}}>
+                  <input type="checkbox" checked={ageConsent} onChange={(e) => setAgeConsent(e.target.checked)} style={{marginTop: '2px'}} />
+                  <span>I confirm that I am 18 years of age or older.</span>
+                </label>
+                <label style={{display: 'flex', alignItems: 'flex-start', gap: '6px', fontSize: '10px', color: '#9a3412', cursor: 'pointer'}}>
+                  <input type="checkbox" checked={termsConsent} onChange={(e) => setTermsConsent(e.target.checked)} style={{marginTop: '2px'}} />
+                  <span>I accept the Terms of Service and Privacy Policy.</span>
+                </label>
+                <div style={{fontSize: '9px', color: '#c2410c', marginTop: '4px', fontStyle: 'italic'}}>SoulSync complies with Zero-Data Retention policy. Chat contents are flushed upon ending session.</div>
+              </div>
+            )}
             <label className="search-box"><Icon name="search" size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search conversations" aria-label="Search conversations" /><kbd>⌘ K</kbd></label>
             <div className="filter-tabs" role="tablist" aria-label="Filter conversations">
               {(['all', 'unread', 'starred'] as Filter[]).map((value) => <button key={value} role="tab" aria-selected={filter === value} className={filter === value ? 'filter-tab selected' : 'filter-tab'} onClick={() => setFilter(value)}>{value === 'all' ? 'All' : value === 'unread' ? 'Unread' : 'Starred'}{value === 'unread' && unreadCount > 0 && <span className="tab-count">{unreadCount}</span>}</button>)}
@@ -478,9 +536,59 @@ function App() {
           </aside>
         </div>
         {toast && <div className="toast" role="status"><Icon name="check" size={16} />{toast}</div>}
+        
+        {showPricingModal && (
+          <div style={{position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000}} onClick={() => setShowPricingModal(false)}>
+            <div style={{background: 'white', borderRadius: '12px', maxWidth: '600px', width: '90%', maxHeight: '90vh', overflow: 'auto', padding: '24px'}} onClick={(e) => e.stopPropagation()}>
+              <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px'}}>
+                <h2 style={{margin: 0, fontSize: '24px', fontWeight: '700'}}>Upgrade Your Plan</h2>
+                <button onClick={() => setShowPricingModal(false)} style={{background: 'none', border: 'none', cursor: 'pointer', fontSize: '24px'}}><Icon name="close" size={24} /></button>
+              </div>
+              <p style={{color: '#666', marginBottom: '24px'}}>Choose the plan that fits your needs</p>
+              <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '16px'}}>
+                <div style={{border: userCredits.plan_type === 'free' ? '2px solid #b85d7b' : '1px solid #e5e7eb', borderRadius: '8px', padding: '16px', position: 'relative'}}>
+                  {userCredits.plan_type === 'free' && <div style={{position: 'absolute', top: '-10px', left: '50%', transform: 'translateX(-50%)', background: '#b85d7b', color: 'white', padding: '4px 12px', borderRadius: '12px', fontSize: '11px'}}>Current</div>}
+                  <h3 style={{margin: '10px 0 8px', fontSize: '18px'}}>Free Tier</h3>
+                  <div style={{fontSize: '24px', fontWeight: '700', marginBottom: '12px'}}>₹0<span style={{fontSize: '14px', fontWeight: '400'}}>/month</span></div>
+                  <ul style={{listStyle: 'none', padding: 0, margin: '0 0 16px', fontSize: '12px'}}>
+                    <li style={{marginBottom: '6px'}}>✓ {userCredits.plan_type === 'free' ? userCredits.credits_remaining : 10} Chat Analyses</li>
+                    <li style={{marginBottom: '6px'}}>✓ Basic Psychology Analysis</li>
+                    <li style={{marginBottom: '6px'}}>✓ Limited Slang Suggestions</li>
+                  </ul>
+                </div>
+                <div style={{border: userCredits.plan_type === 'pro' ? '2px solid #a78bfa' : '1px solid #e5e7eb', borderRadius: '8px', padding: '16px', position: 'relative'}}>
+                  {userCredits.plan_type === 'pro' && <div style={{position: 'absolute', top: '-10px', left: '50%', transform: 'translateX(-50%)', background: '#a78bfa', color: 'white', padding: '4px 12px', borderRadius: '12px', fontSize: '11px'}}>Current</div>}
+                  <h3 style={{margin: '10px 0 8px', fontSize: '18px'}}>Pro Starter</h3>
+                  <div style={{fontSize: '24px', fontWeight: '700', marginBottom: '12px'}}>₹199<span style={{fontSize: '14px', fontWeight: '400'}}>/month</span></div>
+                  <ul style={{listStyle: 'none', padding: 0, margin: '0 0 16px', fontSize: '12px'}}>
+                    <li style={{marginBottom: '6px'}}>✓ 150 Chat Analyses</li>
+                    <li style={{marginBottom: '6px'}}>✓ Full Psychology Score</li>
+                    <li style={{marginBottom: '6px'}}>✓ Custom Relationship Goals</li>
+                    <li style={{marginBottom: '6px'}}>✓ Telugu Youth Slang Suggestions</li>
+                  </ul>
+                  <button style={{width: '100%', padding: '8px', background: '#a78bfa', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer'}}>Upgrade to Pro</button>
+                </div>
+                <div style={{border: userCredits.plan_type === 'vip' ? '2px solid #fbbf24' : '1px solid #e5e7eb', borderRadius: '8px', padding: '16px', position: 'relative'}}>
+                  {userCredits.plan_type === 'vip' && <div style={{position: 'absolute', top: '-10px', left: '50%', transform: 'translateX(-50%)', background: '#fbbf24', color: 'white', padding: '4px 12px', borderRadius: '12px', fontSize: '11px'}}>Current</div>}
+                  <h3 style={{margin: '10px 0 8px', fontSize: '18px'}}>Unlimited VIP</h3>
+                  <div style={{fontSize: '24px', fontWeight: '700', marginBottom: '12px'}}>₹499<span style={{fontSize: '14px', fontWeight: '400'}}>/month</span></div>
+                  <ul style={{listStyle: 'none', padding: 0, margin: '0 0 16px', fontSize: '12px'}}>
+                    <li style={{marginBottom: '6px'}}>✓ Unlimited Analyses</li>
+                    <li style={{marginBottom: '6px'}}>✓ Real-time Auto-Suggest</li>
+                    <li style={{marginBottom: '6px'}}>✓ Priority Speed</li>
+                    <li style={{marginBottom: '6px'}}>✓ Full Privacy Mode</li>
+                  </ul>
+                  <button style={{width: '100%', padding: '8px', background: '#fbbf24', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer'}}>Upgrade to VIP</button>
+                </div>
+              </div>
+              <p style={{fontSize: '11px', color: '#666', marginTop: '16px', textAlign: 'center'}}>Payment integration coming soon. Contact support for upgrades.</p>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   )
 }
+
 
 export default App

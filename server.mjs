@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import express from 'express'
+import { GoogleGenerativeAI } from '@google/generative-ai'
 
 const root = path.dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -20,6 +21,8 @@ const oauthStateTtlMs = 10 * 60 * 1000
 const sessions = new Map()
 const sessionSecret = process.env.SESSION_SECRET || randomBytes(32).toString('hex')
 const llmApiKey = process.env.OPENAI_API_KEY || process.env.LLM_API_KEY
+const geminiApiKey = process.env.GEMINI_API_KEY
+const genAI = geminiApiKey ? new GoogleGenerativeAI(geminiApiKey) : null
 
 if (isProduction && (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32)) {
   throw new Error('Set SESSION_SECRET to a random value of at least 32 characters in production.')
@@ -58,9 +61,15 @@ function getSessionId(req) {
 
 function getOrCreateSession(req, res) {
   const existing = getSessionId(req)
-  if (existing) return existing
+  if (existing) {
+    const session = sessions.get(existing)
+    if (session && !session.credits) {
+      session.credits = { credits_remaining: 10, plan_type: 'free' }
+    }
+    return existing
+  }
   const id = randomBytes(32).toString('base64url')
-  sessions.set(id, { expiresAt: Date.now() + sessionTtlMs })
+  sessions.set(id, { expiresAt: Date.now() + sessionTtlMs, credits: { credits_remaining: 10, plan_type: 'free' } })
   const secure = isProduction ? '; Secure' : ''
   res.append('Set-Cookie', `${cookieName}=${encodeURIComponent(`${id}.${sign(id)}`)}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${Math.floor(sessionTtlMs / 1000)}${secure}`)
   return id
@@ -98,9 +107,37 @@ app.use((req, res, next) => {
 
 app.get('/api/instagram/status', (req, res) => {
   const sessionId = getSessionId(req)
-  const account = sessionId ? sessions.get(sessionId)?.instagramAccount : null
+  const session = sessionId ? sessions.get(sessionId) : null
+  const account = session?.instagramAccount
+  if (session && !session.credits) {
+    session.credits = { credits_remaining: 10, plan_type: 'free' }
+  }
   res.setHeader('Cache-Control', 'no-store')
   res.json({ configured: Boolean(appId && appSecret), connected: Boolean(account), account: account ? { username: account.username, accountType: account.accountType, userId: account.userId } : null })
+})
+
+app.get('/api/user/credits', (req, res) => {
+  const sessionId = getSessionId(req) || getOrCreateSession(req, res)
+  const session = sessions.get(sessionId)
+  if (session && !session.credits) {
+    session.credits = { credits_remaining: 10, plan_type: 'free' }
+  }
+  res.setHeader('Cache-Control', 'no-store')
+  res.json(session?.credits || { credits_remaining: 10, plan_type: 'free' })
+})
+
+app.post('/api/user/accept-terms', (req, res) => {
+  if (!sameOrigin(req)) return res.status(403).json({ error: 'Cross-origin request rejected.' })
+  const sessionId = getSessionId(req) || getOrCreateSession(req, res)
+  const session = sessions.get(sessionId)
+  if (session) {
+    session.accepted_terms_at = new Date().toISOString()
+    if (!session.credits) {
+      session.credits = { credits_remaining: 10, plan_type: 'free' }
+    }
+  }
+  res.setHeader('Cache-Control', 'no-store')
+  res.json({ success: true })
 })
 
 app.get('/api/instagram/login', (req, res) => {
@@ -260,17 +297,27 @@ app.post('/api/analyze-chat', async (req, res) => {
   const auth = requireAuth(req, res)
   if (!auth) return
   
+  // Check credits
+  if (auth.session.credits) {
+    if (auth.session.credits.plan_type !== 'vip' && auth.session.credits.credits_remaining <= 0) {
+      return res.status(402).json({ error: 'Insufficient credits', upgrade_required: true })
+    }
+  } else {
+    auth.session.credits = { credits_remaining: 10, plan_type: 'free' }
+  }
+  
   try {
-    const { messages, goal } = req.body
+    const { messages, goal, relationship_goal } = req.body
+    const selectedGoal = goal || relationship_goal || 'Serious love'
     if (!Array.isArray(messages)) {
       return res.status(400).json({ error: 'Messages array required' })
     }
     
     const chatContext = messages.map(m => `${m.from === 'you' ? 'User' : 'Match'}: ${m.text}`).join('\n')
     
-    const prompt = `You are SoulSync, an AI dating and communication coach specializing in Gen-Z dating psychology with Telugu-English youth slang awareness.
+    const prompt = `You are SoulSync, an expert Gen-Z relationship and dating communication assistant. Analyze the incoming chat history and the user's selected relationship goal. Evaluate match psychology, interest level (High/Medium/Low), reply timings, and intent. Provide a strategic reply matching modern youth slang (blending English and localized youth vibe).
 
-Analyze this Instagram chat conversation and provide strategic advice based on the user's relationship goal: ${goal || 'Serious love'}
+Analyze this Instagram chat conversation and provide strategic advice based on the user's relationship goal: ${selectedGoal}
 
 Chat context:
 ${chatContext}
@@ -287,10 +334,30 @@ Rules:
 1. Analyze psychological state, interest level (High/Medium/Low), and reply timing
 2. Generate strategic, witty suggested response matching modern youth conversation (Telugu-English slang)
 3. Be authentic and helpful, not manipulative
-4. Consider the relationship goal when crafting advice`
+4. Consider the relationship goal when crafting advice
+5. Always respond with valid JSON only.`
 
     let analysisResult
-    if (llmApiKey) {
+    if (genAI) {
+      try {
+        const model = genAI.getGenerativeModel({ 
+          model: "gemini-1.5-flash",
+          generationConfig: {
+            responseMimeType: "application/json",
+            temperature: 0.7,
+            maxOutputTokens: 500,
+          }
+        })
+        const result = await model.generateContent(prompt)
+        const response = await result.response
+        const text = response.text()
+        if (text) {
+          analysisResult = JSON.parse(text)
+        }
+      } catch (geminiError) {
+        console.error('Gemini API error:', geminiError)
+      }
+    } else if (llmApiKey) {
       try {
         const llmResponse = await fetch('https://api.openai.com/v1/chat/completions', {
           method: 'POST',
@@ -330,10 +397,15 @@ Rules:
       
       analysisResult = {
         match_interest_score: score,
-        psychology_analysis: `Based on the conversation, there's ${score > 70 ? 'good' : 'moderate'} interest. ${questions > 0 ? 'They\'re asking questions showing curiosity.' : 'Keep engaging to build more interest.'} For a ${goal || 'Serious love'} goal, focus on building emotional connection.`,
-        suggested_reply: goal === 'Casual dating' ? "ayyo nice! spill the tea, what made you pick this spot?" : goal === 'Serious love' ? "that sounds really sweet yaar. tell me more about what you love about it" : "sounds interesting ra! what got you into that?",
+        psychology_analysis: `Based on the conversation, there's ${score > 70 ? 'good' : 'moderate'} interest. ${questions > 0 ? 'They\'re asking questions showing curiosity.' : 'Keep engaging to build more interest.'} For a ${selectedGoal} goal, focus on building emotional connection.`,
+        suggested_reply: selectedGoal === 'Casual dating' ? "ayyo nice! spill the tea, what made you pick this spot?" : selectedGoal === 'Serious love' ? "that sounds really sweet yaar. tell me more about what you love about it" : "sounds interesting ra! what got you into that?",
         timing_advice: "Reply within 2-4 hours to maintain good momentum without seeming too eager."
       }
+    }
+    
+    // Deduct credit if not VIP
+    if (auth.session.credits && auth.session.credits.plan_type !== 'vip') {
+      auth.session.credits.credits_remaining = Math.max(0, auth.session.credits.credits_remaining - 1)
     }
     
     res.setHeader('Cache-Control', 'no-store')
