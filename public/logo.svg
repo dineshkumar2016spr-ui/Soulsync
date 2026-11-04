@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 64">
+  <defs>
+    <linearGradient id="ssg" x1="8" y1="12" x2="56" y2="52" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ef8d9a"/>
+      <stop offset="0.55" stop-color="#d06487"/>
+      <stop offset="1" stop-color="#9a6be0"/>
+    </linearGradient>
+  </defs>
+  <!-- mark -->
+  <path d="M32 46 C22 39.5 15.5 32.6 15.5 25.4 C15.5 19.6 19.9 15.4 25.2 15.4 C28.1 15.4 30.6 16.7 32 18.9 C33.4 16.7 35.9 15.4 38.8 15.4 C44.1 15.4 48.5 19.6 48.5 25.4 C48.5 32.6 42 39.5 32 46 Z"
+        fill="none" stroke="url(#ssg)" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
+  <circle cx="32" cy="26.5" r="3.2" fill="#ef8d9a"/>
+  <circle cx="25.5" cy="26.5" r="1.8" fill="#d06487"/>
+  <circle cx="38.5" cy="26.5" r="1.8" fill="#9a6be0"/>
+  <!-- wordmark -->
+  <text x="66" y="40" font-family="Avenir Next, Segoe UI, Inter, sans-serif" font-size="21" font-weight="700" letter-spacing="4.5" fill="#f2f1f4">SOULSYNC</text>
+</svg>

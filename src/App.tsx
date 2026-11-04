@@ -11,7 +11,6 @@ type Contact = {
   time: string
   channel: string
   threadId?: string
-  participantId?: string
 }
 
 type Message = {
@@ -29,30 +28,13 @@ type ChatReport = {
 }
 
 type Filter = 'all' | 'unread' | 'starred'
-type InstagramStatus = { configured: boolean; connected: boolean; account: { username: string; accountType: string; userId?: string; pageName?: string } | null }
-
-type ApiConversation = {
-  id: string
-  name?: string
-  username?: string
-  participantId?: string
-  snippet?: string
-  updatedTime?: string
-}
-
-type ApiMessage = { id: string; text?: string; fromMe?: boolean; createdAt?: string }
+type InstagramStatus = { configured: boolean; connected: boolean; account: { username: string; accountType: string } | null }
 
 type ChatAnalysis = {
   match_interest_score: number
   psychology_analysis: string
   suggested_reply: string
   timing_advice: string
-}
-
-type UserCredits = {
-  credits_remaining: number
-  plan_type: 'free' | 'pro' | 'vip'
-  accepted_terms_at?: string
 }
 
 const contacts: Contact[] = [
@@ -62,8 +44,6 @@ const contacts: Contact[] = [
   { id: 'sam', name: 'Sam Okafor', handle: '@samokafor', initials: 'SO', tone: 'green', preview: 'You: Saturday works for me', time: '3h', channel: 'Instagram' },
   { id: 'ella', name: 'Ella Brooks', handle: '@ellabrooks', initials: 'EB', tone: 'lavender', preview: 'Haha, I knew you would get it', time: 'Yesterday', channel: 'Instagram' },
 ]
-
-const emptyContact: Contact = { id: '', name: 'No conversation yet', handle: '', initials: 'IG', tone: 'rose', preview: '', time: '', channel: 'Instagram' }
 
 const intents = ['Serious love', 'Open relationship', 'Situationship', 'Casual dating', 'Friendship first', 'Still figuring it out']
 
@@ -117,21 +97,11 @@ function createReport(messages: Message[], contact: Contact, intent: string): Ch
   }
 }
 
-const oauthErrorMessages: Record<string, string> = {
-  denied: 'Instagram login was cancelled before it finished.',
-  token_exchange_failed: 'Meta rejected the login code. Check INSTAGRAM_APP_ID / INSTAGRAM_APP_SECRET.',
-  pages_fetch_failed: 'Could not read your Facebook Pages. Confirm you granted pages_show_list.',
-  no_pages: 'No Facebook Page found on this account. Link a Page to your Instagram professional account first.',
-  no_instagram_account: 'That Page has no linked Instagram Business account. Convert the Instagram profile to a professional account and connect it to the Page.',
-  connection_failed: 'Instagram connection did not complete. Please try again.',
-}
-
 function readOAuthResultToast(): string {
   try {
     const params = new URLSearchParams(window.location.search)
     if (params.get('instagram_connected') === '1') return 'Instagram account connected securely'
-    const error = params.get('instagram_error')
-    if (error) return oauthErrorMessages[error] ?? oauthErrorMessages.connection_failed
+    if (params.has('instagram_error')) return 'Instagram connection did not complete. Please try again.'
   } catch {
     // Ignore malformed query strings
   }
@@ -156,16 +126,9 @@ function App() {
   const [chatAnalysis, setChatAnalysis] = useState<ChatAnalysis | null>(null)
   const [analyzing, setAnalyzing] = useState(false)
   const [sending, setSending] = useState(false)
-  const [realContacts, setRealContacts] = useState<Contact[]>(contacts)
-  const [loadingConversations, setLoadingConversations] = useState(false)
-  const [ageConsent, setAgeConsent] = useState(false)
-  const [termsConsent, setTermsConsent] = useState(false)
-  const [userCredits, setUserCredits] = useState<UserCredits>({ credits_remaining: 10, plan_type: 'free' })
-  const [showPricingModal, setShowPricingModal] = useState(false)
-  const [showMobileCoach] = useState(false)
-  void showMobileCoach
+  const [realContacts] = useState<Contact[]>(contacts)
 
-  const selected = realContacts.find((contact) => contact.id === selectedId) ?? realContacts[0] ?? emptyContact
+  const selected = realContacts.find((contact) => contact.id === selectedId) ?? realContacts[0]
   const messages = messagesByContact[selectedId] ?? []
   const visibleContacts = useMemo(() => realContacts.filter((contact) => {
     const matchesSearch = `${contact.name} ${contact.handle}`.toLowerCase().includes(search.toLowerCase())
@@ -184,17 +147,6 @@ function App() {
       .then((status) => { if (!cancelled) setInstagramStatus(status) })
       .catch(() => { if (!cancelled) setInstagramStatus({ configured: false, connected: false, account: null }) })
 
-    fetch('/api/user/credits', { credentials: 'same-origin' })
-      .then(async (response) => {
-        if (response.ok) {
-          const data = await response.json()
-          return { credits_remaining: data.credits_remaining || 10, plan_type: (data.plan_type === 'pro' || data.plan_type === 'vip') ? data.plan_type : 'free' } as UserCredits
-        }
-        return { credits_remaining: 10, plan_type: 'free' } as UserCredits
-      })
-      .then((credits) => { if (!cancelled) setUserCredits(credits) })
-      .catch(() => {})
-
     const params = new URLSearchParams(window.location.search)
     if (params.has('instagram_connected') || params.has('instagram_error')) {
       window.history.replaceState({}, document.title, window.location.pathname)
@@ -209,89 +161,25 @@ function App() {
     }
   }, [instagramStatus.connected])
 
-  function showToast(message: string, duration = 3600) {
-    setToast(message)
-    window.setTimeout(() => setToast(''), duration)
-  }
-
-  async function loadThreadMessages(contact: Contact) {
-    if (!contact.threadId || !instagramStatus.connected) return
-    try {
-      const response = await fetch(`/api/instagram/messages/${encodeURIComponent(contact.threadId)}`, { credentials: 'same-origin' })
-      const data = await response.json().catch(() => ({}))
-      if (!response.ok) {
-        showToast(typeof data.error === 'string' ? data.error : 'Could not load this conversation.', 5000)
-        return
-      }
-      const loadedMessages: Message[] = (Array.isArray(data.messages) ? data.messages : []).map((message: ApiMessage) => ({
-        id: message.id,
-        from: message.fromMe ? 'you' : 'them',
-        text: message.text || '',
-        time: message.createdAt ? new Date(message.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
-      }))
-      setMessagesByContact((current) => ({ ...current, [contact.id]: loadedMessages }))
-    } catch (error) {
-      console.error('Failed to load messages:', error)
-      showToast('Could not load messages from Instagram.', 4000)
-    }
-  }
-
   async function fetchConversations() {
-    setLoadingConversations(true)
     try {
       const response = await fetch('/api/instagram/conversations', { credentials: 'same-origin' })
-      const data = await response.json().catch(() => ({}))
-      if (!response.ok) {
-        setRealContacts([])
-        const message = typeof data.error === 'string' ? data.error : 'Could not load Instagram conversations.'
-        const hint = typeof data.hint === 'string' ? ` ${data.hint}` : ''
-        showToast(`${message}${hint}`, 6500)
-        return
+      if (response.ok) {
+        const data = await response.json()
+        // For now, keep using mock data but this is where real data would go
+        console.log('Conversations:', data)
       }
-
-      const tones = ['rose', 'blue', 'gold', 'green', 'lavender']
-      const apiContacts: Contact[] = (Array.isArray(data.conversations) ? data.conversations : []).map((conversation: ApiConversation, index: number) => {
-        const name = conversation.name || conversation.username || 'Instagram user'
-        const initials = name.replace(/^@/, '').split(/[\s._-]+/).filter(Boolean).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || 'IG'
-        return {
-          id: conversation.id,
-          name,
-          handle: conversation.username ? `@${conversation.username}` : 'Instagram DM',
-          initials,
-          tone: tones[index % tones.length],
-          preview: conversation.snippet || 'Open this chat to load messages',
-          time: conversation.updatedTime ? new Date(conversation.updatedTime).toLocaleDateString([], { month: 'short', day: 'numeric' }) : '',
-          channel: 'Instagram',
-          threadId: conversation.id,
-          participantId: conversation.participantId || '',
-        }
-      })
-
-      setRealContacts(apiContacts)
-      setSelectedId((current) => (apiContacts.some((contact) => contact.id === current) ? current : apiContacts[0]?.id ?? ''))
-      if (apiContacts.length > 0) void loadThreadMessages(apiContacts[0])
     } catch (error) {
       console.error('Failed to fetch conversations:', error)
-      setRealContacts([])
-      showToast('Could not reach Instagram. Please try again.', 4000)
-    } finally {
-      setLoadingConversations(false)
     }
   }
 
   function connectInstagram() {
-    if (!ageConsent || !termsConsent) {
-      setToast('Please accept the age verification and Terms of Service to continue.')
-      window.setTimeout(() => setToast(''), 3200)
-      return
-    }
     if (!instagramStatus.configured) {
       setToast('Instagram Login needs setup: set INSTAGRAM_APP_ID, INSTAGRAM_APP_SECRET and INSTAGRAM_REDIRECT_URI on the server.')
       window.setTimeout(() => setToast(''), 5200)
       return
     }
-    // Accept terms on backend
-    fetch('/api/user/accept-terms', { method: 'POST', credentials: 'same-origin' }).catch(() => {})
     setInstagramBusy(true)
     window.location.assign('/api/instagram/login')
   }
@@ -311,7 +199,7 @@ function App() {
     }
   }
 
-  async function selectContact(contact: Contact) {
+  function selectContact(contact: Contact) {
     setSelectedId(contact.id)
     setMobileInboxOpen(false)
     setUnread((current) => {
@@ -323,18 +211,10 @@ function App() {
     setEnded(false)
     setReport(null)
     setChatAnalysis(null)
-    
-    await loadThreadMessages(contact)
   }
 
   async function analyzeChat() {
     if (messages.length === 0 || analyzing) return
-    if (userCredits.credits_remaining <= 0 && userCredits.plan_type !== 'vip') {
-      setShowPricingModal(true)
-      setToast("You've used all free credits! Upgrade to continue.")
-      window.setTimeout(() => setToast(''), 3200)
-      return
-    }
     setAnalyzing(true)
     try {
       const response = await fetch('/api/analyze-chat', {
@@ -346,16 +226,8 @@ function App() {
       if (response.ok) {
         const analysis = await response.json() as ChatAnalysis
         setChatAnalysis(analysis)
-        // Update credits
-        if (userCredits.plan_type !== 'vip') {
-          setUserCredits(prev => ({ ...prev, credits_remaining: Math.max(0, prev.credits_remaining - 1) }))
-        }
         setToast('AI analysis complete')
         window.setTimeout(() => setToast(''), 2600)
-      } else if (response.status === 402) {
-        setShowPricingModal(true)
-        setToast('Insufficient credits. Please upgrade your plan.')
-        window.setTimeout(() => setToast(''), 3200)
       } else {
         setToast('Analysis failed. Please try again.')
         window.setTimeout(() => setToast(''), 2600)
@@ -383,28 +255,15 @@ function App() {
     setSending(true)
     
     try {
-      const contact = selected
-      if (contact.threadId && instagramStatus.connected) {
-        const response = await fetch('/api/instagram/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'same-origin',
-          body: JSON.stringify({ threadId: contact.threadId, recipientId: contact.participantId, message: text })
-        })
-        if (!response.ok) {
-          const data = await response.json().catch(() => ({}))
-          throw new Error(typeof data.hint === 'string' ? data.hint : typeof data.error === 'string' ? data.error : 'Failed to send message')
-        }
-      }
-      
       const nextMessage: Message = { id: `you-${Date.now()}`, from: 'you', text, time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
       setMessagesByContact((current) => ({ ...current, [selectedId]: [...(current[selectedId] ?? []), nextMessage] }))
       setDraft('')
-      setToast('Message sent via Instagram')
+      setToast('Message sent')
       window.setTimeout(() => setToast(''), 2600)
     } catch (error) {
       console.error('Send error:', error)
-      showToast(error instanceof Error ? error.message : 'Failed to send message', 5000)
+      setToast('Failed to send message')
+      window.setTimeout(() => setToast(''), 2600)
     } finally {
       setSending(false)
     }
@@ -459,27 +318,13 @@ function App() {
         <header className="topbar">
           <div className="wordmark">soulsync<span>.</span></div>
           <div className="topbar-context"><span className="topbar-divider" />AI Dating & Communication Coach</div>
-          <div className="topbar-right"><span className="privacy-pill"><Icon name="lock" size={13} /> Zero-retention privacy</span><button onClick={() => setShowPricingModal(true)} style={{display: 'flex', alignItems: 'center', gap: '4px', padding: '6px 10px', background: userCredits.plan_type === 'vip' ? '#fbbf24' : userCredits.plan_type === 'pro' ? '#a78bfa' : '#f3f4f6', color: userCredits.plan_type === 'free' ? '#374151' : 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '11px', fontWeight: '600'}}><Icon name="sparkle" size={12} /> {userCredits.plan_type === 'vip' ? 'VIP' : userCredits.plan_type === 'pro' ? `Pro (${userCredits.credits_remaining})` : `Free (${userCredits.credits_remaining})`} </button><button className="profile-button" aria-label="Your profile"><span className="profile-avatar">D</span><span className="profile-name">Dinesh</span><span className="chevron">⌄</span></button></div>
+          <div className="topbar-right"><span className="privacy-pill"><Icon name="lock" size={13} /> Zero-retention privacy</span><button className="profile-button" aria-label="Your profile"><span className="profile-avatar">D</span><span className="profile-name">Dinesh</span><span className="chevron">⌄</span></button></div>
         </header>
 
         <div className={`app-layout ${mobileInboxOpen ? 'mobile-inbox-open' : ''}`}>
           <section className="inbox-panel" aria-label="Social inbox">
             <div className="inbox-heading"><div><p className="eyebrow">YOUR SPACE</p><h1>Inbox <span className="count-pill">{unreadCount}</span></h1></div><button className="icon-button" aria-label="Inbox options"><Icon name="more" /></button></div>
-            <div className={`social-account ${instagramStatus.connected ? 'instagram-connected' : ''}`}><span className="instagram-mark"><Icon name="instagram" size={17} /></span><div className="social-label"><strong>{instagramStatus.connected && instagramStatus.account ? `@${instagramStatus.account.username}` : 'Instagram'}</strong><small>{instagramStatus.connected && instagramStatus.account ? `${instagramStatus.account.accountType.toLowerCase()} account connected` : 'Business or Creator account'}</small></div>{instagramStatus.connected ? <><span className="connected-dot" /><button type="button" className="instagram-connect-button disconnect-instagram-button" onClick={disconnectInstagram} disabled={instagramBusy}>Disconnect</button></> : <button type="button" className="instagram-connect-button" onClick={connectInstagram} disabled={instagramBusy || !ageConsent || !termsConsent}>{instagramBusy ? 'Opening…' : 'Connect'}</button>}</div>
-            {!instagramStatus.connected && (
-              <div style={{padding: '10px', background: '#fff7ed', borderRadius: '8px', marginBottom: '10px', border: '1px solid #fed7aa'}}>
-                <div style={{fontSize: '11px', fontWeight: '600', color: '#ea580c', marginBottom: '6px'}}>Legal Consent Required</div>
-                <label style={{display: 'flex', alignItems: 'flex-start', gap: '6px', fontSize: '10px', color: '#9a3412', marginBottom: '4px', cursor: 'pointer'}}>
-                  <input type="checkbox" checked={ageConsent} onChange={(e) => setAgeConsent(e.target.checked)} style={{marginTop: '2px'}} />
-                  <span>I confirm that I am 18 years of age or older.</span>
-                </label>
-                <label style={{display: 'flex', alignItems: 'flex-start', gap: '6px', fontSize: '10px', color: '#9a3412', cursor: 'pointer'}}>
-                  <input type="checkbox" checked={termsConsent} onChange={(e) => setTermsConsent(e.target.checked)} style={{marginTop: '2px'}} />
-                  <span>I accept the Terms of Service and Privacy Policy.</span>
-                </label>
-                <div style={{fontSize: '9px', color: '#c2410c', marginTop: '4px', fontStyle: 'italic'}}>SoulSync complies with Zero-Data Retention policy. Chat contents are flushed upon ending session.</div>
-              </div>
-            )}
+            <div className={`social-account ${instagramStatus.connected ? 'instagram-connected' : ''}`}><span className="instagram-mark"><Icon name="instagram" size={17} /></span><div className="social-label"><strong>{instagramStatus.connected && instagramStatus.account ? `@${instagramStatus.account.username}` : 'Instagram'}</strong><small>{instagramStatus.connected && instagramStatus.account ? `${instagramStatus.account.accountType.toLowerCase()} account connected` : 'Business or Creator account'}</small></div>{instagramStatus.connected ? <><span className="connected-dot" /><button type="button" className="instagram-connect-button disconnect-instagram-button" onClick={disconnectInstagram} disabled={instagramBusy}>Disconnect</button></> : <button type="button" className="instagram-connect-button" onClick={connectInstagram} disabled={instagramBusy}>{instagramBusy ? 'Opening…' : 'Connect'}</button>}</div>
             <label className="search-box"><Icon name="search" size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search conversations" aria-label="Search conversations" /><kbd>⌘ K</kbd></label>
             <div className="filter-tabs" role="tablist" aria-label="Filter conversations">
               {(['all', 'unread', 'starred'] as Filter[]).map((value) => <button key={value} role="tab" aria-selected={filter === value} className={filter === value ? 'filter-tab selected' : 'filter-tab'} onClick={() => setFilter(value)}>{value === 'all' ? 'All' : value === 'unread' ? 'Unread' : 'Starred'}{value === 'unread' && unreadCount > 0 && <span className="tab-count">{unreadCount}</span>}</button>)}
@@ -491,10 +336,9 @@ function App() {
                   <span className="contact-copy"><span className="contact-name-line"><strong>{contact.name}</strong><time>{contact.time}</time></span><span className="contact-preview">{contact.preview}</span><span className="contact-channel"><Icon name="instagram" size={11} /> Instagram</span></span>
                   <button type="button" className={`star-toggle ${starred.has(contact.id) ? 'is-starred' : ''}`} aria-label={starred.has(contact.id) ? `Unstar ${contact.name}` : `Star ${contact.name}`} aria-pressed={starred.has(contact.id)} onClick={(event) => { event.stopPropagation(); toggleStar(contact.id) }}>✦</button>
                 </div>
-              )) : <div className="empty-contacts"><span>{loadingConversations ? 'Syncing your inbox…' : instagramStatus.connected ? 'No Instagram DMs yet' : 'Nothing here just yet'}</span><small>{instagramStatus.connected ? 'New Instagram conversations appear here automatically.' : 'Connect Instagram to see conversations.'}</small></div>}
+              )) : <div className="empty-contacts"><span>Nothing here just yet</span><small>Connect Instagram to see conversations.</small></div>}
             </div>
-            <div className="inbox-footer"><span className="footer-status-dot" />{instagramStatus.connected ? (loadingConversations ? 'Syncing...' : 'Live from Instagram') : 'Demo mode'}</div>
-            {instagramStatus.connected && <button type="button" className="refresh-inbox-button" onClick={() => void fetchConversations()} disabled={loadingConversations}>↻ Refresh inbox</button>}
+            <div className="inbox-footer"><span className="footer-status-dot" />{instagramStatus.connected ? 'Live from Instagram' : 'Demo mode'}</div>
           </section>
           {mobileInboxOpen && <button className="mobile-inbox-scrim" onClick={() => setMobileInboxOpen(false)} aria-label="Close inbox overlay" />}
 
@@ -572,59 +416,9 @@ function App() {
           </aside>
         </div>
         {toast && <div className="toast" role="status"><Icon name="check" size={16} />{toast}</div>}
-        
-        {showPricingModal && (
-          <div style={{position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000}} onClick={() => setShowPricingModal(false)}>
-            <div style={{background: 'white', borderRadius: '12px', maxWidth: '600px', width: '90%', maxHeight: '90vh', overflow: 'auto', padding: '24px'}} onClick={(e) => e.stopPropagation()}>
-              <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px'}}>
-                <h2 style={{margin: 0, fontSize: '24px', fontWeight: '700'}}>Upgrade Your Plan</h2>
-                <button onClick={() => setShowPricingModal(false)} style={{background: 'none', border: 'none', cursor: 'pointer', fontSize: '24px'}}><Icon name="close" size={24} /></button>
-              </div>
-              <p style={{color: '#666', marginBottom: '24px'}}>Choose the plan that fits your needs</p>
-              <div style={{display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '16px'}}>
-                <div style={{border: userCredits.plan_type === 'free' ? '2px solid #b85d7b' : '1px solid #e5e7eb', borderRadius: '8px', padding: '16px', position: 'relative'}}>
-                  {userCredits.plan_type === 'free' && <div style={{position: 'absolute', top: '-10px', left: '50%', transform: 'translateX(-50%)', background: '#b85d7b', color: 'white', padding: '4px 12px', borderRadius: '12px', fontSize: '11px'}}>Current</div>}
-                  <h3 style={{margin: '10px 0 8px', fontSize: '18px'}}>Free Tier</h3>
-                  <div style={{fontSize: '24px', fontWeight: '700', marginBottom: '12px'}}>₹0<span style={{fontSize: '14px', fontWeight: '400'}}>/month</span></div>
-                  <ul style={{listStyle: 'none', padding: 0, margin: '0 0 16px', fontSize: '12px'}}>
-                    <li style={{marginBottom: '6px'}}>✓ {userCredits.plan_type === 'free' ? userCredits.credits_remaining : 10} Chat Analyses</li>
-                    <li style={{marginBottom: '6px'}}>✓ Basic Psychology Analysis</li>
-                    <li style={{marginBottom: '6px'}}>✓ Limited Slang Suggestions</li>
-                  </ul>
-                </div>
-                <div style={{border: userCredits.plan_type === 'pro' ? '2px solid #a78bfa' : '1px solid #e5e7eb', borderRadius: '8px', padding: '16px', position: 'relative'}}>
-                  {userCredits.plan_type === 'pro' && <div style={{position: 'absolute', top: '-10px', left: '50%', transform: 'translateX(-50%)', background: '#a78bfa', color: 'white', padding: '4px 12px', borderRadius: '12px', fontSize: '11px'}}>Current</div>}
-                  <h3 style={{margin: '10px 0 8px', fontSize: '18px'}}>Pro Starter</h3>
-                  <div style={{fontSize: '24px', fontWeight: '700', marginBottom: '12px'}}>₹199<span style={{fontSize: '14px', fontWeight: '400'}}>/month</span></div>
-                  <ul style={{listStyle: 'none', padding: 0, margin: '0 0 16px', fontSize: '12px'}}>
-                    <li style={{marginBottom: '6px'}}>✓ 150 Chat Analyses</li>
-                    <li style={{marginBottom: '6px'}}>✓ Full Psychology Score</li>
-                    <li style={{marginBottom: '6px'}}>✓ Custom Relationship Goals</li>
-                    <li style={{marginBottom: '6px'}}>✓ Telugu Youth Slang Suggestions</li>
-                  </ul>
-                  <button style={{width: '100%', padding: '8px', background: '#a78bfa', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer'}}>Upgrade to Pro</button>
-                </div>
-                <div style={{border: userCredits.plan_type === 'vip' ? '2px solid #fbbf24' : '1px solid #e5e7eb', borderRadius: '8px', padding: '16px', position: 'relative'}}>
-                  {userCredits.plan_type === 'vip' && <div style={{position: 'absolute', top: '-10px', left: '50%', transform: 'translateX(-50%)', background: '#fbbf24', color: 'white', padding: '4px 12px', borderRadius: '12px', fontSize: '11px'}}>Current</div>}
-                  <h3 style={{margin: '10px 0 8px', fontSize: '18px'}}>Unlimited VIP</h3>
-                  <div style={{fontSize: '24px', fontWeight: '700', marginBottom: '12px'}}>₹499<span style={{fontSize: '14px', fontWeight: '400'}}>/month</span></div>
-                  <ul style={{listStyle: 'none', padding: 0, margin: '0 0 16px', fontSize: '12px'}}>
-                    <li style={{marginBottom: '6px'}}>✓ Unlimited Analyses</li>
-                    <li style={{marginBottom: '6px'}}>✓ Real-time Auto-Suggest</li>
-                    <li style={{marginBottom: '6px'}}>✓ Priority Speed</li>
-                    <li style={{marginBottom: '6px'}}>✓ Full Privacy Mode</li>
-                  </ul>
-                  <button style={{width: '100%', padding: '8px', background: '#fbbf24', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer'}}>Upgrade to VIP</button>
-                </div>
-              </div>
-              <p style={{fontSize: '11px', color: '#666', marginTop: '16px', textAlign: 'center'}}>Payment integration coming soon. Contact support for upgrades.</p>
-            </div>
-          </div>
-        )}
       </main>
     </div>
   )
 }
-
 
 export default App

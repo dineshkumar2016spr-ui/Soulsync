@@ -1,133 +1,61 @@
-# Muse — Chat Coach
+# Muse / SoulSync — Chat Coach
 
-React + TypeScript + Vite frontend with a small Node/Express server that hosts the app and handles **Instagram Login (OAuth)** securely.
+React + TypeScript + Vite frontend with a small Node/Express server that hosts the app and does the WhatsApp work **server-side**.
+
+The user links their own WhatsApp by scanning a QR code — the same "Linked devices" flow as WhatsApp Web — and then picks **which chats to import**. Only the chats they tick are readable by the app, and only for the lifetime of the session.
 
 ## Run locally
 
 ```bash
 npm install
-npm run dev   # app + OAuth API at http://localhost:5175
+npm run dev   # app at http://localhost:5175
 ```
 
 Production:
 
 ```bash
 npm run build
-npm start      # requires SESSION_SECRET and INSTAGRAM_REDIRECT_URI
+npm start     # requires SESSION_SECRET
 ```
 
-## Instagram Login setup
+## How the WhatsApp login works
 
-The **Connect** button starts Meta's OAuth dialog and the server does the whole exchange. App secrets and tokens never reach the browser: the server validates OAuth `state`, trades the code for a user token, resolves the Facebook Page and its `instagram_business_account`, and keeps the resulting **Page access token** in a signed HttpOnly session.
+1. The person ticks the two consent boxes (18+ and Terms) in the inbox panel, then presses **Connect**.
+2. `POST /api/whatsapp/connect` starts a Baileys socket and the server renders a pairing QR code.
+3. They open **WhatsApp → Settings → Linked devices → Link a device** and scan it. The app polls `/api/whatsapp/status` and closes the QR modal as soon as the socket reports `open`.
+4. The chat picker lists their chats; they tick the ones to import and press **Import selected**.
+5. `POST /api/whatsapp/import` marks those chats as selected and pulls up to 50 messages each for chats that arrived without messages.
 
-Flow:
+Flow of the endpoints:
 
-1. `GET /api/instagram/login` → redirects to `https://www.facebook.com/{GRAPH_API_VERSION}/dialog/oauth` with `instagram_basic, instagram_manage_messages, pages_show_list, pages_read_engagement`.
-2. `GET /api/instagram/callback` → `oauth/access_token` → long-lived user token → `GET /me/accounts?fields=...,instagram_business_account{id,username}`.
-3. `GET /api/instagram/conversations` → `GET /{ig-business-id}/conversations?platform=instagram` for the inbox list.
-4. `GET /api/instagram/messages/:threadId` → last 20 messages of the selected thread.
-5. `POST /api/instagram/send` → `POST /{ig-business-id}/messages` with `recipient.id`, only after the user approves the draft.
-
-Configure in the [Meta app dashboard](https://developers.facebook.com/apps):
-
-1. Add the **Facebook Login** product and, under **Instagram**, the **Instagram API with Instagram Login** messaging permissions.
-2. Add this exact **Valid OAuth Redirect URI** (no trailing slash):
-   `http://localhost:5175/api/instagram/callback` — and for production `https://<your-app-domain>/api/instagram/callback`.
-3. Copy `.env.example` to `.env` and fill in `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`, `INSTAGRAM_REDIRECT_URI` (must match step 2 byte-for-byte).
-4. Run `npm run dev` and click **Connect**.
-
-Requirements and limits:
-
-- The Instagram profile must be a **Business or Creator** account **linked to a Facebook Page** that you admin. The callback resolves the Page automatically; without one it returns `?instagram_error=no_instagram_account`.
-- `instagram_manage_messages` must be approved for the app (App Review) before Meta will return real DM threads and allow sends. Until then the inbox loads but Meta rejects the conversation request — the UI surfaces Meta's message.
-- Sends only work inside Instagram's 24-hour customer-message window.
-- Optional tuning: `GRAPH_API_VERSION` (default `v21.0`) and `LLM_MODEL`.
-- Production needs `SESSION_SECRET` (≥ 32 random chars) and a public `INSTAGRAM_REDIRECT_URI` matching the Meta dashboard.
-
-Troubleshooting (`?instagram_error=` codes shown as a toast):
-
-| code | meaning |
+| endpoint | purpose |
 | --- | --- |
-| `denied` | the user cancelled the dialog |
-| `token_exchange_failed` | app id/secret or redirect URI mismatch |
-| `pages_fetch_failed` | `pages_show_list` not granted |
-| `no_pages` | no Facebook Page on that account |
-| `no_instagram_account` | Page has no linked Instagram Business account |
+| `GET /api/whatsapp/status` | connection state, QR image, linked account, chat/import counts |
+| `POST /api/whatsapp/connect` | start the socket and produce a QR |
+| `GET /api/whatsapp/chats` | chats visible to the linked device (for the picker) |
+| `POST /api/whatsapp/import` | `{ chatIds: string[] }` — up to 25 chats |
+| `GET /api/whatsapp/messages/:chatId` | imported chat's messages |
+| `POST /api/whatsapp/send` | send a reply, only for an imported chat |
+| `POST /api/whatsapp/disconnect` | log out and drop everything |
+| `POST /api/whatsapp/cleanup` | clear imported chat bodies, keep the link |
 
----
+Optional environment variables:
 
-# React + TypeScript + Vite template notes
+- `SESSION_SECRET` — required in production, at least 32 random characters.
+- `GEMINI_API_KEY` or `OPENAI_API_KEY` — enables real AI analysis in `/api/analyze-chat`. Without one, the route returns a simple heuristic analysis.
+- `PORT` — defaults to `5175`.
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+## Important limits
 
-Currently, two official plugins are available:
+- **This is not the official WhatsApp Business API.** It uses the unofficial Baileys linked-device protocol, which is against WhatsApp's Terms of Service. A connected number can be rate limited or banned. Only use it with a number you control and accept that risk.
+- **No data is written to disk.** Signal credentials, the chat index and every message body live in server memory only, attached to the signed session cookie. Restarting the server, pressing Disconnect, or End Chat drops them. There is no database and no recovery.
+- **One linked device per server session.** Connecting again replaces the previous socket.
+- **Chat list is bounded by what WhatsApp syncs.** A fresh linked device receives recent chats; groups and very old threads may need a reload before they appear. `syncFullHistory` is deliberately off — with it on, WhatsApp closes the socket (status 428) before issuing a QR code.
+- **Sends are exactly what the account could send by hand.** No bulk messaging; the UI only sends after explicit approval.
+- The app has **no user accounts**. The "login" is the WhatsApp link itself; the only thing stored is an anonymous signed session cookie.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Frontend notes
 
-## React Compiler
+Vite + React 19 + Tailwind. `src/App.tsx` holds the inbox, chat panel, AI coach, the QR modal and the selective-import picker. `src/App.css` holds all styling, including the modal styles (`.wa-modal*`).
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
-```
-
-You can also install [eslint-plugin-react-x](https://npmx.dev/package/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://npmx.dev/package/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-
-```
+Demo chats are shown until a WhatsApp account is linked, so the interface is usable without a phone.
